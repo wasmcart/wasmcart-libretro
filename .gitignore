@@ -1,0 +1,8 @@
+build/
+deps/libnode/
+*.o
+*.so
+*.dylib
+*.dll
+*.tar.gz
+*.zip

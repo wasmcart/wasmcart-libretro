@@ -1,0 +1,38 @@
+# Software Information
+display_name = "wasmcart"
+categories = "Game"
+authors = "monteslu"
+corename = "wasmcart"
+supported_extensions = "wasc"
+license = "MIT"
+permissions = ""
+display_version = "0.1.0"
+
+# Hardware Information
+manufacturer = "wasmcart"
+systemname = "wasmcart"
+systemid = "wasmcart"
+
+# BIOS / Firmware
+firmware_count = 0
+
+# Libretro Features
+savestate = "true"
+savestate_features = "serialized"
+cheats = "false"
+input_descriptors = "true"
+memory_descriptors = "false"
+libretro_saves = "true"
+core_options = "false"
+core_options_version = "1.0"
+load_subsystem = "false"
+supports_no_game = "false"
+single_purpose = "false"
+database = "wasmcart"
+hw_render = "true"
+required_hw_api = "OpenGL Core >= 3.3 | OpenGL ES >= 2.0"
+needs_fullpath = "true"
+disk_control = "false"
+is_experimental = "true"
+
+description = "WASM game cartridge host. Runs sandboxed .wasc and .wasm game carts with WebGL2 GPU, stereo audio, and 4-player gamepad input. Supports Godot 4.x, ioquake3, GZDoom, and any engine compiled to WASM. Powered by V8."

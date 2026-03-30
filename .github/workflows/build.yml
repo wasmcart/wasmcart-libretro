@@ -1,0 +1,178 @@
+name: Build wasmcart-libretro
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  LIBNODE_VERSION: v24.14.1
+
+jobs:
+  build-linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ libegl-dev libgles-dev
+      - name: Download libnode
+        run: |
+          mkdir -p deps/libnode
+          curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-linux-x86_64.tar.gz | tar xz -C deps/libnode
+      - name: Build
+        run: mkdir build && cd build && cmake .. && make -j$(nproc)
+      - name: Package
+        run: |
+          strip build/wasmcart_libretro.so
+          tar czf wasmcart_libretro-linux-x86_64.tar.gz -C build wasmcart_libretro.so
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wasmcart_libretro-linux-x86_64
+          path: wasmcart_libretro-linux-x86_64.tar.gz
+
+  build-linux-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ libegl-dev libgles-dev
+      - name: Download libnode
+        run: |
+          mkdir -p deps/libnode
+          curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-linux-aarch64.tar.gz | tar xz -C deps/libnode
+      - name: Build
+        run: mkdir build && cd build && cmake .. && make -j$(nproc)
+      - name: Package
+        run: |
+          strip build/wasmcart_libretro.so
+          tar czf wasmcart_libretro-linux-aarch64.tar.gz -C build wasmcart_libretro.so
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wasmcart_libretro-linux-aarch64
+          path: wasmcart_libretro-linux-aarch64.tar.gz
+
+  build-macos-x86_64:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download libnode
+        run: |
+          mkdir -p deps/libnode
+          curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-macos-x86_64.tar.gz | tar xz -C deps/libnode
+      - name: Build
+        run: mkdir build && cd build && cmake .. && make -j$(sysctl -n hw.ncpu)
+      - name: Package
+        run: |
+          strip -x build/wasmcart_libretro.dylib
+          tar czf wasmcart_libretro-macos-x86_64.tar.gz -C build wasmcart_libretro.dylib
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wasmcart_libretro-macos-x86_64
+          path: wasmcart_libretro-macos-x86_64.tar.gz
+
+  build-macos-aarch64:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download libnode
+        run: |
+          mkdir -p deps/libnode
+          curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-macos-aarch64.tar.gz | tar xz -C deps/libnode
+      - name: Build
+        run: mkdir build && cd build && cmake .. && make -j$(sysctl -n hw.ncpu)
+      - name: Package
+        run: |
+          strip -x build/wasmcart_libretro.dylib
+          tar czf wasmcart_libretro-macos-aarch64.tar.gz -C build wasmcart_libretro.dylib
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wasmcart_libretro-macos-aarch64
+          path: wasmcart_libretro-macos-aarch64.tar.gz
+
+  build-windows-x86_64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Download libnode
+        shell: bash
+        run: |
+          mkdir -p deps/libnode
+          curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-windows-x86_64.zip -o libnode.zip
+          unzip -q libnode.zip -d deps/libnode
+      - name: Build
+        shell: cmd
+        run: |
+          mkdir build
+          cd build
+          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release -DLIBNODE_DIR=..\deps\libnode
+          ninja
+      - name: Package
+        shell: bash
+        run: |
+          cd build
+          7z a ../wasmcart_libretro-windows-x86_64.zip wasmcart_libretro.dll
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wasmcart_libretro-windows-x86_64
+          path: wasmcart_libretro-windows-x86_64.zip
+
+  build-android-aarch64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27c
+      - name: Download libnode
+        run: |
+          mkdir -p deps/libnode
+          curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-android-aarch64.tar.gz | tar xz -C deps/libnode
+      - name: Build
+        run: |
+          mkdir build && cd build
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-33
+          make -j$(nproc)
+      - name: Package
+        run: |
+          ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip build/wasmcart_libretro.so
+          tar czf wasmcart_libretro-android-aarch64.tar.gz -C build wasmcart_libretro.so
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wasmcart_libretro-android-aarch64
+          path: wasmcart_libretro-android-aarch64.tar.gz
+
+  release:
+    needs: [build-linux-x86_64, build-linux-aarch64, build-macos-x86_64, build-macos-aarch64, build-windows-x86_64, build-android-aarch64]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "wasmcart-libretro ${{ github.ref_name }}"
+          body: |
+            wasmcart RetroArch libretro core. Plays `.wasc` game carts in RetroArch with V8 WASM engine.
+
+            Supports 2D framebuffer carts, GL carts (Godot, ioquake3, GZDoom), and all wasmcart ABI features.
+
+            Install: copy `wasmcart_libretro.so` (or `.dylib` / `.dll`) to your RetroArch cores directory.
+          files: |
+            artifacts/wasmcart_libretro-linux-x86_64/*.tar.gz
+            artifacts/wasmcart_libretro-linux-aarch64/*.tar.gz
+            artifacts/wasmcart_libretro-macos-x86_64/*.tar.gz
+            artifacts/wasmcart_libretro-macos-aarch64/*.tar.gz
+            artifacts/wasmcart_libretro-windows-x86_64/*.zip
+            artifacts/wasmcart_libretro-android-aarch64/*.tar.gz
