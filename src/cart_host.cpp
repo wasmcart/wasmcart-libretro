@@ -4,12 +4,14 @@
 
 // Provide the snapshot stub that libnode.a references but doesn't include.
 // Embedders don't use snapshots — return null.
+// Must match the exact signature: node::SnapshotData const* (not void*)
 namespace node {
+struct SnapshotData;
 class SnapshotBuilder {
 public:
-    static const void* GetEmbeddedSnapshotData();
+    static const SnapshotData* GetEmbeddedSnapshotData();
 };
-const void* SnapshotBuilder::GetEmbeddedSnapshotData() { return nullptr; }
+const SnapshotData* SnapshotBuilder::GetEmbeddedSnapshotData() { return nullptr; }
 }
 
 #include "node.h"
