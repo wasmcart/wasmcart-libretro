@@ -44,7 +44,6 @@ target_include_directories(wasmcart_libretro PRIVATE
 
 # libnode
 if(WIN32)
-    target_link_options(wasmcart_libretro PRIVATE "/WHOLEARCHIVE:${LIBNODE_DIR}/libnode.lib")
     target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.lib winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt)
 else()
     target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a pthread dl m)
