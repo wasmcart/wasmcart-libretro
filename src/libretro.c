@@ -139,13 +139,11 @@ static void on_context_reset(void) {
 
     // Now GL is available — finish deferred init
     if (host) {
-        // Set RetroArch's hw_render FBO as redirect BEFORE cart init.
-        // Ganesh stores the current "default" FBO at surface creation time.
-        // If we create our own FBO here, Ganesh resolves to it but we later
-        // switch to RetroArch's FBO — content goes to wrong place.
-        uintptr_t init_fbo = hw_render.get_current_framebuffer();
-        extern void wc_gl_set_redirect_fbo(uint32_t fbo, uint32_t width, uint32_t height);
-        wc_gl_set_redirect_fbo((uint32_t)init_fbo, pref_width, pref_height);
+        // Create redirect FBO with depth+stencil BEFORE cart init.
+        // Three.js needs depth testing, Ganesh needs stencil.
+        // RetroArch's hw_render FBO may not have these attachments.
+        extern void wc_gl_setup_redirect(uint32_t w, uint32_t h);
+        wc_gl_setup_redirect(pref_width, pref_height);
 
         wc_host_finish_init(host);
 
@@ -340,12 +338,9 @@ void retro_run(void) {
     frame_count++;
 
     // 4. Run one frame
-    if (uses_gl && hw_render.get_current_framebuffer) {
-        // Set RetroArch's hw_render FBO as our redirect target DIRECTLY.
-        // Cart's glBindFramebuffer(0) will bind this FBO — no intermediate blit needed.
-        uintptr_t ra_fbo = hw_render.get_current_framebuffer();
-        extern void wc_gl_set_redirect_fbo(uint32_t fbo, uint32_t width, uint32_t height);
-        wc_gl_set_redirect_fbo((uint32_t)ra_fbo, pref_width, pref_height);
+    if (uses_gl) {
+        extern void wc_gl_rebind_redirect(void);
+        wc_gl_rebind_redirect();
     }
     wc_host_run_frame(host);
 
@@ -356,8 +351,20 @@ void retro_run(void) {
 
     // 5. Present video
     if (uses_gl && hw_render.get_current_framebuffer) {
-        // Cart rendered directly to RetroArch's FBO — just tell RetroArch
-        video_cb(RETRO_HW_FRAME_BUFFER_VALID, pref_width, pref_height, 0);
+        uintptr_t ra_fbo = hw_render.get_current_framebuffer();
+
+        extern int wc_gl_has_redirect(void);
+        extern void wc_gl_get_blit_size(uint32_t* w, uint32_t* h);
+        uint32_t blit_w = 0, blit_h = 0;
+        wc_gl_get_blit_size(&blit_w, &blit_h);
+        if (!blit_w) blit_w = pref_width;
+        if (!blit_h) blit_h = pref_height;
+
+        if (wc_gl_has_redirect()) {
+            extern void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h);
+            wc_gl_blit_to_fbo((uint32_t)ra_fbo, blit_w, blit_h, blit_w, blit_h);
+        }
+        video_cb(RETRO_HW_FRAME_BUFFER_VALID, blit_w, blit_h, 0);
     } else {
         // 2D cart — pass framebuffer to RetroArch
         uint32_t w, h;
