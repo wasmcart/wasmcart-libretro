@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install deps
         run: sudo apt-get update && sudo apt-get install -y cmake g++ libegl-dev libgles-dev
       - name: Download libnode
@@ -35,6 +37,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Install deps
         run: sudo apt-get update && sudo apt-get install -y cmake g++ libegl-dev libgles-dev
       - name: Download libnode
@@ -56,6 +60,8 @@ jobs:
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Download libnode
         run: |
           mkdir -p deps/libnode
@@ -75,6 +81,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Download libnode
         run: |
           mkdir -p deps/libnode
@@ -94,6 +102,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: ilammy/msvc-dev-cmd@v1
       - name: Download libnode
         shell: bash
@@ -122,6 +132,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: Set up NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
@@ -156,6 +168,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: actions/download-artifact@v8
         with:
           path: artifacts

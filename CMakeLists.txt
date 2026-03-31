@@ -11,6 +11,10 @@ if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
+# ─── Shared code from wasmcart-native (submodule) ────────────────────────
+
+set(WC_NATIVE "${CMAKE_CURRENT_SOURCE_DIR}/deps/wasmcart-native")
+
 # ─── Node.js / libnode ───────────────────────────────────────────────────
 
 set(LIBNODE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps/libnode" CACHE PATH "Path to libnode.a + headers")
@@ -25,11 +29,11 @@ endif()
 
 add_library(wasmcart_libretro SHARED
     src/libretro.c
-    src/cart_host.cpp
-    src/gl_imports.cpp
-    src/asset_loader.c
-    deps/miniz.c
-    deps/cJSON.c
+    ${WC_NATIVE}/src/cart_host.cpp
+    ${WC_NATIVE}/src/gl_imports.cpp
+    ${WC_NATIVE}/src/asset_loader.c
+    ${WC_NATIVE}/deps/miniz.c
+    ${WC_NATIVE}/deps/cJSON.c
 )
 
 # No "lib" prefix — RetroArch expects "wasmcart_libretro.so" not "libwasmcart_libretro.so"
@@ -37,8 +41,9 @@ set_target_properties(wasmcart_libretro PROPERTIES PREFIX "")
 
 target_include_directories(wasmcart_libretro PRIVATE
     src
-    include
-    deps
+    ${WC_NATIVE}/include
+    ${WC_NATIVE}/src
+    ${WC_NATIVE}/deps
     ${LIBNODE_DIR}/include
 )
 
@@ -82,6 +87,7 @@ endif()
 
 message(STATUS "")
 message(STATUS "wasmcart-libretro:")
+message(STATUS "  wasmcart-native: ${WC_NATIVE}")
 message(STATUS "  libnode: ${LIBNODE_DIR}")
 message(STATUS "  GLESv2:  ${GLESV2_LIB}")
 message(STATUS "  EGL:     ${EGL_LIB}")
