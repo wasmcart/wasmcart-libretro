@@ -139,11 +139,13 @@ static void on_context_reset(void) {
 
     // Now GL is available — finish deferred init
     if (host) {
-        // Set up FBO redirect BEFORE cart init — Ganesh captures the current FBO
-        // at init time. If redirect isn't bound, Ganesh targets RetroArch's FBO
-        // directly and our glBindFramebuffer(0) interceptor never sees its resolve blit.
-        extern void wc_gl_setup_redirect(uint32_t w, uint32_t h);
-        wc_gl_setup_redirect(pref_width, pref_height);
+        // Set RetroArch's hw_render FBO as redirect BEFORE cart init.
+        // Ganesh stores the current "default" FBO at surface creation time.
+        // If we create our own FBO here, Ganesh resolves to it but we later
+        // switch to RetroArch's FBO — content goes to wrong place.
+        uintptr_t init_fbo = hw_render.get_current_framebuffer();
+        extern void wc_gl_set_redirect_fbo(uint32_t fbo, uint32_t width, uint32_t height);
+        wc_gl_set_redirect_fbo((uint32_t)init_fbo, pref_width, pref_height);
 
         wc_host_finish_init(host);
 
