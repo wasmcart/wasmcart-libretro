@@ -151,14 +151,18 @@ static void on_context_reset(void) {
         uint32_t redir_h = pref_height > cart_h ? pref_height : cart_h;
         wc_gl_setup_redirect(redir_w, redir_h);
 
-        // Update geometry for RetroArch
-        struct retro_game_geometry geom = {0};
-        geom.base_width = redir_w;
-        geom.base_height = redir_h;
-        geom.max_width = redir_w;
-        geom.max_height = redir_h;
-        geom.aspect_ratio = (float)cart_w / (float)cart_h;
-        environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
+        // Update full AV info — SET_GEOMETRY alone won't resize RetroArch's FBO
+        struct retro_system_av_info av = {0};
+        av.geometry.base_width = redir_w;
+        av.geometry.base_height = redir_h;
+        av.geometry.max_width = redir_w;
+        av.geometry.max_height = redir_h;
+        av.geometry.aspect_ratio = (float)redir_w / (float)redir_h;
+        av.timing.fps = 60.0;
+        const wc_cart_info_t* ci2 = wc_host_get_cart_info(host);
+        av.timing.sample_rate = ci2->audio_sample_rate ? (double)ci2->audio_sample_rate : 48000.0;
+        environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
+        fprintf(stderr, "wasmcart: SET_SYSTEM_AV_INFO %ux%u\n", redir_w, redir_h);
     }
 }
 
@@ -342,11 +346,18 @@ void retro_run(void) {
 
         // Blit our redirect FBO to RetroArch's FBO
         extern int wc_gl_has_redirect(void);
+        extern void wc_gl_get_blit_size(uint32_t* w, uint32_t* h);
+        uint32_t blit_w = 0, blit_h = 0;
+        wc_gl_get_blit_size(&blit_w, &blit_h);
+        if (!blit_w) blit_w = pref_width;
+        if (!blit_h) blit_h = pref_height;
+
+
         if (wc_gl_has_redirect()) {
             extern void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h);
-            wc_gl_blit_to_fbo((uint32_t)ra_fbo, cart_w, cart_h, cart_w, cart_h);
+            wc_gl_blit_to_fbo((uint32_t)ra_fbo, blit_w, blit_h, blit_w, blit_h);
         }
-        video_cb(RETRO_HW_FRAME_BUFFER_VALID, cart_w, cart_h, 0);
+        video_cb(RETRO_HW_FRAME_BUFFER_VALID, blit_w, blit_h, 0);
     } else {
         // 2D cart — pass framebuffer to RetroArch
         uint32_t w, h;

@@ -877,6 +877,11 @@ extern "C" void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t
     _draw_call_count = 0;
 }
 
+extern "C" void wc_gl_get_blit_size(uint32_t* w, uint32_t* h) {
+    *w = _cart_blit_w;
+    *h = _cart_blit_h;
+}
+
 extern "C" void wc_gl_setup_redirect(uint32_t width, uint32_t height) {
     _ensure_redirect_fbo(width, height);
 }
