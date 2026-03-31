@@ -234,16 +234,18 @@ bool retro_load_game(const struct retro_game_info* game) {
         hw_render.depth = true;
         hw_render.stencil = true;
 
+        // Prefer GLES3 — wasmcart carts expect ES 3.0 (precision qualifiers, etc.)
+        // Core 3.3 context rejects ES-specific GLSL syntax
         bool got_context = false;
-        hw_render.context_type = RETRO_HW_CONTEXT_OPENGL_CORE;
+        hw_render.context_type = RETRO_HW_CONTEXT_OPENGLES3;
         hw_render.version_major = 3;
-        hw_render.version_minor = 3;
+        hw_render.version_minor = 0;
         if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
             got_context = true;
         } else {
-            hw_render.context_type = RETRO_HW_CONTEXT_OPENGLES3;
+            hw_render.context_type = RETRO_HW_CONTEXT_OPENGL_CORE;
             hw_render.version_major = 3;
-            hw_render.version_minor = 0;
+            hw_render.version_minor = 3;
             if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
                 got_context = true;
             } else {
