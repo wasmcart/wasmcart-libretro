@@ -41,6 +41,47 @@ void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb) { audio_batch_c
 void retro_set_input_poll(retro_input_poll_t cb) { input_poll_cb = cb; }
 void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
 
+// ─── Core options ───────────────────────────────────────────────────────────
+
+static uint32_t pref_width = 1920;
+static uint32_t pref_height = 1080;
+
+static const struct retro_core_option_v2_definition option_defs[] = {
+    {
+        "wasmcart_resolution",
+        "Internal Resolution",
+        NULL,
+        "Resolution passed to the cart. The cart decides its actual render size.",
+        NULL, "video",
+        {
+            { "640x480",   "640x480" },
+            { "1280x720",  "1280x720 (720p)" },
+            { "1920x1080", "1920x1080 (1080p)" },
+            { "2560x1440", "2560x1440 (1440p)" },
+            { "3840x2160", "3840x2160 (4K)" },
+            { NULL, NULL },
+        },
+        "1920x1080"
+    },
+    { NULL, NULL, NULL, NULL, NULL, NULL, {{0}}, NULL },
+};
+
+static const struct retro_core_options_v2 options_v2 = {
+    NULL,  // no categories
+    option_defs,
+};
+
+static void check_options(void) {
+    struct retro_variable var = { "wasmcart_resolution", NULL };
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+        unsigned w = 0, h = 0;
+        if (sscanf(var.value, "%ux%u", &w, &h) == 2 && w > 0 && h > 0) {
+            pref_width = w;
+            pref_height = h;
+        }
+    }
+}
+
 void retro_set_environment(retro_environment_t cb) {
     environ_cb = cb;
 
@@ -48,6 +89,9 @@ void retro_set_environment(retro_environment_t cb) {
     struct retro_log_callback logging;
     if (cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &logging))
         log_cb = logging.log;
+
+    // Core options
+    cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2, (void*)&options_v2);
 
     // We support no-game = false (need a .wasc to load)
     bool no_game = false;
@@ -69,8 +113,8 @@ void retro_get_system_av_info(struct retro_system_av_info* info) {
     memset(info, 0, sizeof(*info));
     info->geometry.base_width = cart_w;
     info->geometry.base_height = cart_h;
-    info->geometry.max_width = 1920;
-    info->geometry.max_height = 1080;
+    info->geometry.max_width = pref_width;
+    info->geometry.max_height = pref_height;
     info->geometry.aspect_ratio = (float)cart_w / (float)cart_h;
     info->timing.fps = 60.0;
 
@@ -150,8 +194,9 @@ bool retro_load_game(const struct retro_game_info* game) {
     wc_host_options_t opts = {0};
     opts.host_fps = 60;
     opts.audio_sample_rate = 48000;
-    opts.preferred_width = 1920;
-    opts.preferred_height = 1080;
+    check_options();
+    opts.preferred_width = pref_width;
+    opts.preferred_height = pref_height;
     opts.defer_init = true;  // always defer — we'll finish in context_reset or first frame
 
     int rc = wc_host_load_file(host, game->path, &opts);
