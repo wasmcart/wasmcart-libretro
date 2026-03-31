@@ -160,6 +160,9 @@ bool retro_load_game(const struct retro_game_info* game) {
         return false;
     }
 
+    // Hold V8 locker persistently — RetroArch calls retro_run from the same thread
+    wc_host_enter_v8();
+
     const wc_cart_info_t* info = wc_host_get_cart_info(host);
     cart_w = info->width;
     cart_h = info->height;

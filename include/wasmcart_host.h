@@ -137,6 +137,8 @@ void wc_host_set_time(wc_host_t* host, double time_ms, double delta_ms, uint32_t
 
 // Run one frame — calls wc_render() on the cart
 void wc_host_run_frame(wc_host_t* host);
+void wc_host_enter_v8(void);
+void wc_host_exit_v8(void);
 
 // Readback — call after wc_host_run_frame()
 const uint8_t*  wc_host_get_framebuffer(wc_host_t* host, uint32_t* width, uint32_t* height);
