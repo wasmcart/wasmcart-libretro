@@ -29,6 +29,7 @@ static int _cart_blitted_to_redirect = 0;
 static uint32_t _cart_blit_w = 0, _cart_blit_h = 0; // actual render size from cart's blit
 static int _fbo_log_frames = 0;
 static int _draw_call_count = 0;
+static int _blit_count = 0;
 
 // Filtered extension list — match WebGL2/Node.js host
 // Prevents Skia/Ganesh from requiring ES 3.1+ functions not in the WASM GL import table
@@ -184,15 +185,25 @@ static uint32_t _gl_alloc_string(wc_host_t* host, const char* s) {
     return 0;
 }
 
+// Detect if we're on a desktop Core context (RetroArch/GLX) vs GLES (EGL)
+static int _is_desktop_gl = -1; // -1 = not checked
+static int check_desktop_gl(void) {
+    if (_is_desktop_gl < 0) {
+        const char* ver = (const char*)glGetString(GL_VERSION);
+        // GLES version strings start with "OpenGL ES"
+        _is_desktop_gl = (ver && strncmp(ver, "OpenGL ES", 9) != 0) ? 1 : 0;
+    }
+    return _is_desktop_gl;
+}
+
 GL_REG(glGetString, 1, 1, {
     uint32_t name = A_U32(0);
     const char* s = (const char*)glGetString(name);
-    // Report ES 3.0 and filtered extensions to match Node.js/WebGL2 host behavior.
-    // Native Mesa reports ES 3.2 with many extensions — Skia then requires function pointers
-    // for those extensions which the cart's MAP table doesn't have.
-    if (name == 0x1F02) s = "OpenGL ES 3.0 wasmcart"; // GL_VERSION
-    // Don't override GL_SHADING_LANGUAGE_VERSION — let Mesa report real version.
-    // ioquake3 uses #version 100 shaders that need the real GLSL 3.x compiler for sampler2DShadow.
+    // On GLES contexts: report ES 3.0 to prevent Skia requesting ES 3.1+ functions.
+    // On desktop Core contexts: DON'T fake ES — Ganesh needs to generate desktop GLSL.
+    if (name == 0x1F02 && !check_desktop_gl()) {
+        s = "OpenGL ES 3.0 wasmcart"; // GL_VERSION — only on real GLES
+    }
     if (name == 0x1F03) { // GL_EXTENSIONS — return WebGL2-compatible subset
         s = "GL_EXT_texture_filter_anisotropic GL_OES_texture_float_linear "
             "GL_EXT_color_buffer_float GL_EXT_float_blend GL_OES_packed_depth_stencil "
@@ -585,6 +596,7 @@ GL_REG(glBlitFramebuffer, 10, 0, {
             _cart_blit_h = (uint32_t)sh;
         }
     }
+    _blit_count++;
     glBlitFramebuffer(A_I32(0), A_I32(1), A_I32(2), A_I32(3), A_I32(4), A_I32(5), A_I32(6), A_I32(7), A_U32(8), A_U32(9));
 })
 GL_REG(glReadPixels, 7, 0, glReadPixels(A_I32(0), A_I32(1), A_I32(2), A_I32(3), A_U32(4), A_U32(5), wptr(A_U32(6))))
@@ -874,6 +886,20 @@ extern "C" void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t
     glViewport(0, 0, _redirect_w, _redirect_h);
     _cart_blitted_to_redirect = 0;
     _last_draw_fbo = _redirect_fbo;
+    _draw_call_count = 0;
+}
+
+extern "C" int wc_gl_get_redirect_fbo(void) { return _redirect_fbo; }
+extern "C" int wc_gl_get_draw_call_count(void) { return _draw_call_count; }
+extern "C" int wc_gl_get_blit_count(void) { return _blit_count; }
+
+extern "C" void wc_gl_rebind_redirect(void) {
+    if (!_redirect_fbo) return;
+    glBindFramebuffer(GL_FRAMEBUFFER, _redirect_fbo);
+    glViewport(0, 0, _redirect_w, _redirect_h);
+    _last_draw_fbo = _redirect_fbo;
+    _cart_blitted_to_redirect = 0;
+    _blit_count = 0;
     _draw_call_count = 0;
 }
 

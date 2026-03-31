@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <math.h>
+#include <GLES3/gl3.h>
 
 // ─── Libretro callbacks ─────────────────────────────────────────────────────
 
@@ -138,6 +139,12 @@ static void on_context_reset(void) {
 
     // Now GL is available — finish deferred init
     if (host) {
+        // Set up FBO redirect BEFORE cart init — Ganesh captures the current FBO
+        // at init time. If redirect isn't bound, Ganesh targets RetroArch's FBO
+        // directly and our glBindFramebuffer(0) interceptor never sees its resolve blit.
+        extern void wc_gl_setup_redirect(uint32_t w, uint32_t h);
+        wc_gl_setup_redirect(pref_width, pref_height);
+
         wc_host_finish_init(host);
 
         // Re-read dimensions (may have changed after init)
@@ -145,11 +152,8 @@ static void on_context_reset(void) {
         cart_w = ci->width;
         cart_h = ci->height;
 
-        // Set up FBO redirect at preferred resolution (cart may render larger than declared size)
-        extern void wc_gl_setup_redirect(uint32_t w, uint32_t h);
-        uint32_t redir_w = pref_width > cart_w ? pref_width : cart_w;
-        uint32_t redir_h = pref_height > cart_h ? pref_height : cart_h;
-        wc_gl_setup_redirect(redir_w, redir_h);
+        uint32_t redir_w = pref_width;
+        uint32_t redir_h = pref_height;
 
         // Update full AV info — SET_GEOMETRY alone won't resize RetroArch's FBO
         struct retro_system_av_info av = {0};
@@ -334,6 +338,10 @@ void retro_run(void) {
     frame_count++;
 
     // 4. Run one frame
+    if (uses_gl) {
+        extern void wc_gl_rebind_redirect(void);
+        wc_gl_rebind_redirect();
+    }
     wc_host_run_frame(host);
 
     if (wc_host_has_trapped(host)) {
@@ -353,7 +361,6 @@ void retro_run(void) {
         wc_gl_get_blit_size(&blit_w, &blit_h);
         if (!blit_w) blit_w = pref_width;
         if (!blit_h) blit_h = pref_height;
-
 
         if (wc_gl_has_redirect()) {
             extern void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h);
