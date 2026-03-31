@@ -247,6 +247,8 @@ static void v8_wc_load_asset(const v8::FunctionCallbackInfo<v8::Value>& args) {
     memcpy(path, _current_host->memory + path_ptr, len);
     path[len] = '\0';
     if (dest_ptr + max_size > _current_host->memory_size) {
+        fprintf(stderr, "wasmcart: asset %s: dest_ptr=%u + max_size=%u > memory_size=%u\n",
+            path, dest_ptr, max_size, _current_host->memory_size);
         args.GetReturnValue().Set(-1);
         return;
     }

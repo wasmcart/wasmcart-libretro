@@ -29,7 +29,6 @@ static int _cart_blitted_to_redirect = 0;
 static uint32_t _cart_blit_w = 0, _cart_blit_h = 0; // actual render size from cart's blit
 static int _fbo_log_frames = 0;
 static int _draw_call_count = 0;
-static int _blit_count = 0;
 
 // Filtered extension list — match WebGL2/Node.js host
 // Prevents Skia/Ganesh from requiring ES 3.1+ functions not in the WASM GL import table
@@ -143,14 +142,7 @@ GL_REG(glHint, 2, 0, glHint(A_U32(0), A_U32(1)))
 GL_REG(glPixelStorei, 2, 0, glPixelStorei(A_U32(0), A_I32(1)))
 GL_REG(glIsEnabled, 1, 1, R_I32(glIsEnabled(A_U32(0))))
 
-GL_REG(glGetIntegerv, 2, 0, {
-    uint32_t pname = A_U32(0);
-    if (pname == 0x821D) { // GL_NUM_EXTENSIONS — return filtered count
-        *(GLint*)wptr(A_U32(1)) = _num_filtered_extensions;
-    } else {
-        glGetIntegerv(pname, (GLint*)wptr(A_U32(1)));
-    }
-})
+GL_REG(glGetIntegerv, 2, 0, glGetIntegerv(A_U32(0), (GLint*)wptr(A_U32(1))))
 GL_REG(glGetFloatv, 2, 0, glGetFloatv(A_U32(0), (GLfloat*)wptr(A_U32(1))))
 GL_REG(glGetBooleanv, 2, 0, glGetBooleanv(A_U32(0), (GLboolean*)wptr(A_U32(1))))
 GL_REG(glGetInternalformativ, 5, 0,
@@ -185,35 +177,18 @@ static uint32_t _gl_alloc_string(wc_host_t* host, const char* s) {
     return 0;
 }
 
-// Detect if we're on a desktop Core context (RetroArch/GLX) vs GLES (EGL)
-static int _is_desktop_gl = -1; // -1 = not checked
-static int check_desktop_gl(void) {
-    if (_is_desktop_gl < 0) {
-        const char* ver = (const char*)glGetString(GL_VERSION);
-        // GLES version strings start with "OpenGL ES"
-        _is_desktop_gl = (ver && strncmp(ver, "OpenGL ES", 9) != 0) ? 1 : 0;
-    }
-    return _is_desktop_gl;
-}
-
 GL_REG(glGetString, 1, 1, {
     uint32_t name = A_U32(0);
     const char* s = (const char*)glGetString(name);
-    // Cap GL version to what our WASM import table supports.
-    // GLES: report ES 3.0 (prevents Skia requesting ES 3.1+ functions)
-    // Desktop: report 3.3 (prevents Skia requesting GL 4.x functions like glMemoryBarrier)
-    // Ganesh generates GLSL matching the reported version.
-    if (name == 0x1F02) {
-        if (check_desktop_gl())
-            s = "3.3.0 wasmcart"; // Desktop GL 3.3
-        else
-            s = "OpenGL ES 3.0 wasmcart"; // GLES 3.0
-    }
-    if (name == 0x1F03) { // GL_EXTENSIONS — return WebGL2-compatible subset
-        s = "GL_EXT_texture_filter_anisotropic GL_OES_texture_float_linear "
-            "GL_EXT_color_buffer_float GL_EXT_float_blend GL_OES_packed_depth_stencil "
-            "GL_OES_texture_npot GL_EXT_texture_norm16";
-    }
+    // Report ES 3.0 and filtered extensions to match Node.js/WebGL2 host behavior.
+    // Native Mesa reports ES 3.2 with many extensions — Skia then requires function pointers
+    // for those extensions which the cart's MAP table doesn't have.
+    // Cap to ES 3.0 — wasmcart ABI = WebGL2 = ES 3.0 max
+    if (name == 0x1F02) s = "OpenGL ES 3.0 wasmcart";
+    // GL_EXTENSIONS via glGetString: empty. Ganesh (on ES 3.0) uses this to probe extensions.
+    // Empty = no extension probing = no missing function pointer failures.
+    // Godot uses glGetStringi (indexed query) which passes through real extensions.
+    // GL_EXTENSIONS: pass through real (Godot needs them)
     if (!s) { R_I32(0); } else {
         int idx = (name == 0x1F00) ? 0 : (name == 0x1F01) ? 1 : (name == 0x1F02) ? 2 :
                   (name == 0x1F03) ? 3 : (name == 0x8B8C) ? 4 : 5;
@@ -492,18 +467,17 @@ GL_REG(glReadBuffer, 1, 0, glReadBuffer(A_U32(0)))
 GL_REG(glGetStringi, 2, 1, {
     uint32_t name = A_U32(0);
     uint32_t index = A_U32(1);
-    if (name == 0x1F03) { // GL_EXTENSIONS — return filtered list
-        const char* s = (index < (uint32_t)_num_filtered_extensions) ? _filtered_extensions[index] : NULL;
-        if (!s) { R_I32(0); } else {
-            uint32_t ptr = _gl_alloc_string(_host, s);
-            R_I32(ptr);
+    const char* s = (const char*)glGetStringi(name, index);
+    {
+        static int _si_dbg = 0;
+        if (_si_dbg < 3 && name == 0x1F03 && s) {
+            fprintf(stderr, "wasmcart: glGetStringi(GL_EXTENSIONS, %u) = %s\n", index, s);
+            _si_dbg++;
         }
-    } else {
-        const char* s = (const char*)glGetStringi(name, index);
-        if (!s) { R_I32(0); } else {
-            uint32_t ptr = _gl_alloc_string(_host, s);
-            R_I32(ptr);
-        }
+    }
+    if (!s) { R_I32(0); } else {
+        uint32_t ptr = _gl_alloc_string(_host, s);
+        R_I32(ptr);
     }
 })
 GL_REG(glGetInteger64v, 2, 0, glGetInteger64v(A_U32(0), (GLint64*)wptr(A_U32(1))))
@@ -601,7 +575,6 @@ GL_REG(glBlitFramebuffer, 10, 0, {
             _cart_blit_h = (uint32_t)sh;
         }
     }
-    _blit_count++;
     glBlitFramebuffer(A_I32(0), A_I32(1), A_I32(2), A_I32(3), A_I32(4), A_I32(5), A_I32(6), A_I32(7), A_U32(8), A_U32(9));
 })
 GL_REG(glReadPixels, 7, 0, glReadPixels(A_I32(0), A_I32(1), A_I32(2), A_I32(3), A_U32(4), A_U32(5), wptr(A_U32(6))))
@@ -894,17 +867,12 @@ extern "C" void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t
     _draw_call_count = 0;
 }
 
-extern "C" int wc_gl_get_redirect_fbo(void) { return _redirect_fbo; }
-extern "C" int wc_gl_get_draw_call_count(void) { return _draw_call_count; }
-extern "C" int wc_gl_get_blit_count(void) { return _blit_count; }
-
 extern "C" void wc_gl_rebind_redirect(void) {
     if (!_redirect_fbo) return;
     glBindFramebuffer(GL_FRAMEBUFFER, _redirect_fbo);
     glViewport(0, 0, _redirect_w, _redirect_h);
     _last_draw_fbo = _redirect_fbo;
     _cart_blitted_to_redirect = 0;
-    _blit_count = 0;
     _draw_call_count = 0;
 }
 
@@ -912,6 +880,8 @@ extern "C" void wc_gl_get_blit_size(uint32_t* w, uint32_t* h) {
     *w = _cart_blit_w;
     *h = _cart_blit_h;
 }
+
+extern "C" int wc_gl_get_redirect_fbo(void) { return _redirect_fbo; }
 
 extern "C" void wc_gl_setup_redirect(uint32_t width, uint32_t height) {
     _ensure_redirect_fbo(width, height);

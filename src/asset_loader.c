@@ -172,15 +172,27 @@ int32_t wc_archive_load_asset(wc_host_t* host, const char* path, uint8_t* dest, 
         snprintf(prefixed, sizeof(prefixed), "assets/%s", path);
         idx = mz_zip_reader_locate_file(zip, prefixed, NULL, 0);
     }
-    if (idx < 0) return -1;
+    if (idx < 0) {
+        static int _miss = 0;
+        if (_miss < 3) { fprintf(stderr, "wasmcart: asset not found: %s\n", path); _miss++; }
+        return -1;
+    }
 
     mz_zip_archive_file_stat stat;
     if (!mz_zip_reader_file_stat(zip, idx, &stat)) return -1;
 
     uint32_t read_size = (uint32_t)stat.m_uncomp_size;
-    if (read_size > max_size) read_size = max_size;
+    if (read_size > max_size) {
+        fprintf(stderr, "wasmcart: asset %s: size %u > max %u, truncating\n", path, read_size, max_size);
+        read_size = max_size;
+    }
 
-    if (!mz_zip_reader_extract_to_mem(zip, idx, dest, read_size, 0)) return -1;
+    if (!mz_zip_reader_extract_to_mem(zip, idx, dest, read_size, 0)) {
+        fprintf(stderr, "wasmcart: asset %s: extract failed\n", path);
+        return -1;
+    }
+    static int _load = 0;
+    if (_load < 5) { fprintf(stderr, "wasmcart: loaded asset %s (%u bytes, max_size=%u, uncomp=%u)\n", path, read_size, max_size, (uint32_t)stat.m_uncomp_size); _load++; }
     return (int32_t)read_size;
 }
 
