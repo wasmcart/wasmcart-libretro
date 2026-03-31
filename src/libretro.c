@@ -145,16 +145,18 @@ static void on_context_reset(void) {
         cart_w = ci->width;
         cart_h = ci->height;
 
-        // Set up FBO redirect
+        // Set up FBO redirect at preferred resolution (cart may render larger than declared size)
         extern void wc_gl_setup_redirect(uint32_t w, uint32_t h);
-        wc_gl_setup_redirect(cart_w, cart_h);
+        uint32_t redir_w = pref_width > cart_w ? pref_width : cart_w;
+        uint32_t redir_h = pref_height > cart_h ? pref_height : cart_h;
+        wc_gl_setup_redirect(redir_w, redir_h);
 
         // Update geometry for RetroArch
         struct retro_game_geometry geom = {0};
-        geom.base_width = cart_w;
-        geom.base_height = cart_h;
-        geom.max_width = cart_w;
-        geom.max_height = cart_h;
+        geom.base_width = redir_w;
+        geom.base_height = redir_h;
+        geom.max_width = redir_w;
+        geom.max_height = redir_h;
         geom.aspect_ratio = (float)cart_w / (float)cart_h;
         environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
     }
@@ -173,6 +175,7 @@ void retro_init(void) {
 }
 
 void retro_deinit(void) {
+    wc_host_exit_v8();
     wc_host_destroy(host);
     host = NULL;
     free(audio_conv_buf);
