@@ -199,10 +199,15 @@ static int check_desktop_gl(void) {
 GL_REG(glGetString, 1, 1, {
     uint32_t name = A_U32(0);
     const char* s = (const char*)glGetString(name);
-    // On GLES contexts: report ES 3.0 to prevent Skia requesting ES 3.1+ functions.
-    // On desktop Core contexts: DON'T fake ES — Ganesh needs to generate desktop GLSL.
-    if (name == 0x1F02 && !check_desktop_gl()) {
-        s = "OpenGL ES 3.0 wasmcart"; // GL_VERSION — only on real GLES
+    // Cap GL version to what our WASM import table supports.
+    // GLES: report ES 3.0 (prevents Skia requesting ES 3.1+ functions)
+    // Desktop: report 3.3 (prevents Skia requesting GL 4.x functions like glMemoryBarrier)
+    // Ganesh generates GLSL matching the reported version.
+    if (name == 0x1F02) {
+        if (check_desktop_gl())
+            s = "3.3.0 wasmcart"; // Desktop GL 3.3
+        else
+            s = "OpenGL ES 3.0 wasmcart"; // GLES 3.0
     }
     if (name == 0x1F03) { // GL_EXTENSIONS — return WebGL2-compatible subset
         s = "GL_EXT_texture_filter_anisotropic GL_OES_texture_float_linear "
