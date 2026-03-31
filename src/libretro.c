@@ -338,9 +338,12 @@ void retro_run(void) {
     frame_count++;
 
     // 4. Run one frame
-    if (uses_gl) {
-        extern void wc_gl_rebind_redirect(void);
-        wc_gl_rebind_redirect();
+    if (uses_gl && hw_render.get_current_framebuffer) {
+        // Set RetroArch's hw_render FBO as our redirect target DIRECTLY.
+        // Cart's glBindFramebuffer(0) will bind this FBO — no intermediate blit needed.
+        uintptr_t ra_fbo = hw_render.get_current_framebuffer();
+        extern void wc_gl_set_redirect_fbo(uint32_t fbo, uint32_t width, uint32_t height);
+        wc_gl_set_redirect_fbo((uint32_t)ra_fbo, pref_width, pref_height);
     }
     wc_host_run_frame(host);
 
@@ -351,22 +354,8 @@ void retro_run(void) {
 
     // 5. Present video
     if (uses_gl && hw_render.get_current_framebuffer) {
-        // Get RetroArch's FBO for this frame
-        uintptr_t ra_fbo = hw_render.get_current_framebuffer();
-
-        // Blit our redirect FBO to RetroArch's FBO
-        extern int wc_gl_has_redirect(void);
-        extern void wc_gl_get_blit_size(uint32_t* w, uint32_t* h);
-        uint32_t blit_w = 0, blit_h = 0;
-        wc_gl_get_blit_size(&blit_w, &blit_h);
-        if (!blit_w) blit_w = pref_width;
-        if (!blit_h) blit_h = pref_height;
-
-        if (wc_gl_has_redirect()) {
-            extern void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h);
-            wc_gl_blit_to_fbo((uint32_t)ra_fbo, blit_w, blit_h, blit_w, blit_h);
-        }
-        video_cb(RETRO_HW_FRAME_BUFFER_VALID, blit_w, blit_h, 0);
+        // Cart rendered directly to RetroArch's FBO — just tell RetroArch
+        video_cb(RETRO_HW_FRAME_BUFFER_VALID, pref_width, pref_height, 0);
     } else {
         // 2D cart — pass framebuffer to RetroArch
         uint32_t w, h;
