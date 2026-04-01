@@ -56,6 +56,7 @@ static const struct retro_core_option_v2_definition option_defs[] = {
         "Resolution passed to the cart. The cart decides its actual render size.",
         NULL, "video",
         {
+            { "auto",      "Auto (cart default)" },
             { "640x480",   "640x480" },
             { "1280x720",  "1280x720 (720p)" },
             { "1920x1080", "1920x1080 (1080p)" },
@@ -63,7 +64,7 @@ static const struct retro_core_option_v2_definition option_defs[] = {
             { "3840x2160", "3840x2160 (4K)" },
             { NULL, NULL },
         },
-        "1920x1080"
+        "auto"
     },
     { NULL, NULL, NULL, NULL, NULL, NULL, {{0}}, NULL },
 };
@@ -76,10 +77,15 @@ static const struct retro_core_options_v2 options_v2 = {
 static void check_options(void) {
     struct retro_variable var = { "wasmcart_resolution", NULL };
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
-        unsigned w = 0, h = 0;
-        if (sscanf(var.value, "%ux%u", &w, &h) == 2 && w > 0 && h > 0) {
-            pref_width = w;
-            pref_height = h;
+        if (strcmp(var.value, "auto") == 0) {
+            pref_width = 0;
+            pref_height = 0;
+        } else {
+            unsigned w = 0, h = 0;
+            if (sscanf(var.value, "%ux%u", &w, &h) == 2 && w > 0 && h > 0) {
+                pref_width = w;
+                pref_height = h;
+            }
         }
     }
 }
