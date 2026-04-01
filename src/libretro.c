@@ -317,10 +317,12 @@ void retro_run(void) {
 
     for (int p = 0; p < WC_MAX_PADS; p++) {
         uint16_t buttons = 0;
-        if (input_state_cb(p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A))     buttons |= WC_BUTTON_A;
-        if (input_state_cb(p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B))     buttons |= WC_BUTTON_B;
-        if (input_state_cb(p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X))     buttons |= WC_BUTTON_X;
-        if (input_state_cb(p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y))     buttons |= WC_BUTTON_Y;
+        // RetroArch uses SNES layout: B=south, A=east, Y=west, X=north
+        // wasmcart uses Xbox/W3C layout: A=south, B=east, X=west, Y=north
+        if (input_state_cb(p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B))     buttons |= WC_BUTTON_A;  // south
+        if (input_state_cb(p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A))     buttons |= WC_BUTTON_B;  // east
+        if (input_state_cb(p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y))     buttons |= WC_BUTTON_X;  // west
+        if (input_state_cb(p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X))     buttons |= WC_BUTTON_Y;  // north
         if (input_state_cb(p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L))     buttons |= WC_BUTTON_L;
         if (input_state_cb(p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R))     buttons |= WC_BUTTON_R;
         if (input_state_cb(p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START)) buttons |= WC_BUTTON_START;
