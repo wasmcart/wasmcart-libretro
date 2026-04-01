@@ -375,8 +375,28 @@ void retro_run(void) {
         if (!blit_h) blit_h = pref_height;
 
         if (wc_gl_has_redirect()) {
+            // Debug: check if redirect FBO has content before blit
+            if (frame_count == 10) {
+                extern int wc_gl_get_redirect_fbo(void);
+                GLuint redir = (GLuint)wc_gl_get_redirect_fbo();
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, redir);
+                uint8_t px[4] = {0};
+                glReadPixels(blit_w/2, blit_h/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                wc_log("wasmcart: redirect FBO center pixel: R=%d G=%d B=%d A=%d (fbo=%u, %ux%u)\n",
+                    px[0], px[1], px[2], px[3], redir, blit_w, blit_h);
+                GLenum err = glGetError();
+                if (err) wc_log("wasmcart: GL error after readback: 0x%04x\n", err);
+                // Also check RetroArch FBO after blit
+            }
             extern void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h, int flip_y);
             wc_gl_blit_to_fbo((uint32_t)ra_fbo, blit_w, blit_h, blit_w, blit_h, 0);
+            if (frame_count == 10) {
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)ra_fbo);
+                uint8_t px[4] = {0};
+                glReadPixels(blit_w/2, blit_h/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                wc_log("wasmcart: RA FBO center pixel: R=%d G=%d B=%d A=%d (fbo=%lu)\n",
+                    px[0], px[1], px[2], px[3], (unsigned long)ra_fbo);
+            }
         }
         video_cb(RETRO_HW_FRAME_BUFFER_VALID, blit_w, blit_h, 0);
     } else {
