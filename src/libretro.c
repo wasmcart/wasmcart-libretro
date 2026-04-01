@@ -401,9 +401,9 @@ void retro_run(void) {
         glDepthFunc(GL_LESS);
         glDepthMask(GL_TRUE);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glStencilMask(1);
+        glStencilMask(0xFF);
         glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-        glStencilFunc(GL_ALWAYS, 0, 1);
+        glStencilFunc(GL_ALWAYS, 0, 0xFF);
         glClearColor(0, 0, 0, 0);
 
         // Unbind textures/samplers on all units
