@@ -113,14 +113,19 @@ jobs:
         with:
           submodules: recursive
       - uses: ilammy/msvc-dev-cmd@v1
-      - name: Download ANGLE headers
+      - name: Download ANGLE
         shell: bash
         run: |
           curl -sL https://github.com/mmozeiko/build-angle/releases/download/2026-03-01/angle-x64-2026-03-01.zip -o angle.zip
           unzip -q angle.zip -d deps/angle_tmp
-          mkdir -p deps/angle/include
+          mkdir -p deps/angle/include deps/angle/lib
           ADIR=$(ls deps/angle_tmp | head -1)
           cp -r deps/angle_tmp/$ADIR/include/* deps/angle/include/
+          # Rename .dll.lib → .lib for MSVC linker
+          for f in deps/angle_tmp/$ADIR/lib/*.dll.lib; do
+            newname=$(basename "$f" .dll.lib).lib
+            cp "$f" "deps/angle/lib/$newname"
+          done
           rm -rf deps/angle_tmp
       - name: Download libnode
         shell: bash

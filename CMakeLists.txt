@@ -47,17 +47,26 @@ target_include_directories(wasmcart_libretro PRIVATE
     ${LIBNODE_DIR}/include
 )
 
-# GLES3/EGL headers — system on Linux/Android, ANGLE on macOS/Windows
-set(ANGLE_DIR "" CACHE PATH "Path to ANGLE headers (macOS/Windows)")
+# GLES3/EGL — system on Linux/Android, ANGLE on macOS/Windows
+set(ANGLE_DIR "" CACHE PATH "Path to ANGLE (lib/ + include/)")
 if(ANGLE_DIR AND EXISTS "${ANGLE_DIR}/include")
     target_include_directories(wasmcart_libretro PRIVATE ${ANGLE_DIR}/include)
+    if(APPLE)
+        target_link_libraries(wasmcart_libretro PRIVATE
+            ${ANGLE_DIR}/lib/libEGL.dylib
+            ${ANGLE_DIR}/lib/libGLESv2.dylib)
+    elseif(WIN32)
+        target_link_libraries(wasmcart_libretro PRIVATE
+            ${ANGLE_DIR}/lib/libEGL.lib
+            ${ANGLE_DIR}/lib/libGLESv2.lib)
+    endif()
 endif()
 
 # libnode
 if(WIN32)
     target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.lib winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt)
 elseif(ANDROID)
-    target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a dl m log GLESv2 EGL android cpufeatures)
+    target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a dl m log GLESv2 EGL android)
 elseif(APPLE)
     target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a pthread dl m
         "-framework CoreFoundation" "-framework Security" "-framework SystemConfiguration")
