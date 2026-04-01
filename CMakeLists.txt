@@ -66,8 +66,9 @@ endif()
 if(WIN32)
     target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.lib winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt)
 elseif(ANDROID)
-    include(AndroidNdkModules)
-    android_ndk_import_module_cpufeatures()
+    # cpu-features: V8 calls android_getCpuFeatures
+    add_library(cpufeatures STATIC ${ANDROID_NDK}/sources/android/cpufeatures/cpu-features.c)
+    target_include_directories(cpufeatures PUBLIC ${ANDROID_NDK}/sources/android/cpufeatures)
     target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a dl m log GLESv3 EGL android cpufeatures)
 elseif(APPLE)
     target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a pthread dl m
