@@ -380,13 +380,23 @@ void retro_run(void) {
                 extern int wc_gl_get_redirect_fbo(void);
                 GLuint redir = (GLuint)wc_gl_get_redirect_fbo();
                 glBindFramebuffer(GL_READ_FRAMEBUFFER, redir);
+                // Read center of redirect FBO
                 uint8_t px[4] = {0};
                 glReadPixels(blit_w/2, blit_h/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-                wc_log("wasmcart: redirect FBO center pixel: R=%d G=%d B=%d A=%d (fbo=%u, %ux%u)\n",
-                    px[0], px[1], px[2], px[3], redir, blit_w, blit_h);
+                wc_log("wasmcart: redirect FBO center(%u,%u): R=%d G=%d B=%d A=%d (fbo=%u, %ux%u)\n",
+                    blit_w/2, blit_h/2, px[0], px[1], px[2], px[3], redir, blit_w, blit_h);
+                // Read at cart's own resolution center
+                uint8_t px2[4] = {0};
+                glReadPixels(cart_w/2, cart_h/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px2);
+                wc_log("wasmcart: redirect FBO cart-center(%u,%u): R=%d G=%d B=%d A=%d\n",
+                    cart_w/2, cart_h/2, px2[0], px2[1], px2[2], px2[3]);
+                // Read at origin area
+                uint8_t px3[4] = {0};
+                glReadPixels(10, 10, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px3);
+                wc_log("wasmcart: redirect FBO origin(10,10): R=%d G=%d B=%d A=%d\n",
+                    px3[0], px3[1], px3[2], px3[3]);
                 GLenum err = glGetError();
                 if (err) wc_log("wasmcart: GL error after readback: 0x%04x\n", err);
-                // Also check RetroArch FBO after blit
             }
             extern void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h, int flip_y);
             wc_gl_blit_to_fbo((uint32_t)ra_fbo, blit_w, blit_h, blit_w, blit_h, 0);
