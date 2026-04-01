@@ -377,27 +377,38 @@ void retro_run(void) {
             wc_gl_blit_to_fbo((uint32_t)ra_fbo, blit_w, blit_h, blit_w, blit_h, 0);
         }
 
-        // Reset GL state so RetroArch's overlay/HUD renders correctly.
-        // Carts (especially Ganesh) leave state dirty after rendering.
+        // Reset ALL GL state so RetroArch's overlay/HUD/menu renders correctly.
+        // Ganesh leaves extensive state dirty (samplers, textures on high units,
+        // premultiplied alpha blend, pixel store, etc.)
         glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)ra_fbo);
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_STENCIL_TEST);
         glDisable(GL_SCISSOR_TEST);
         glDisable(GL_CULL_FACE);
-        glDisable(GL_BLEND);
-        glDepthMask(GL_FALSE);
+        glDisable(GL_DITHER);
+        glDepthMask(GL_TRUE);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glBlendEquation(GL_FUNC_ADD);
         glUseProgram(0);
         glBindVertexArray(0);
+        // Unbind textures on all units Ganesh may have touched (uses up to GL_TEXTURE31)
+        for (int i = 31; i >= 0; i--) {
+            glActiveTexture(GL_TEXTURE0 + i);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glBindSampler(i, 0);
+        }
+        // Leave on unit 0
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, 0);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-        // Unbind samplers — Ganesh binds custom samplers that corrupt RetroArch's textures
-        for (int i = 0; i < 4; i++)
-            glBindSampler(i, 0);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+        glClearColor(0, 0, 0, 0);
+        glViewport(0, 0, blit_w, blit_h);
 
         video_cb(RETRO_HW_FRAME_BUFFER_VALID, blit_w, blit_h, 0);
     } else {
