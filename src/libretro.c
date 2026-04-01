@@ -377,38 +377,51 @@ void retro_run(void) {
             wc_gl_blit_to_fbo((uint32_t)ra_fbo, blit_w, blit_h, blit_w, blit_h, 0);
         }
 
-        // Reset ALL GL state so RetroArch's overlay/HUD/menu renders correctly.
-        // Ganesh leaves extensive state dirty (samplers, textures on high units,
-        // premultiplied alpha blend, pixel store, etc.)
-        glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)ra_fbo);
+        // Reset GL state to match glsm STATE_UNBIND defaults.
+        // RetroArch expects clean default GL state before video_cb.
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glUseProgram(0);
+        glBindVertexArray(0);
+
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_STENCIL_TEST);
         glDisable(GL_SCISSOR_TEST);
         glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
         glDisable(GL_DITHER);
+        glDisable(GL_POLYGON_OFFSET_FILL);
+
+        glBlendFunc(GL_ONE, GL_ZERO);
+        glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ONE, GL_ZERO);
+        glBlendEquation(GL_FUNC_ADD);
+        glCullFace(GL_BACK);
+        glFrontFace(GL_CCW);
+        glDepthFunc(GL_LESS);
         glDepthMask(GL_TRUE);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glBlendEquation(GL_FUNC_ADD);
-        glUseProgram(0);
-        glBindVertexArray(0);
-        // Unbind textures on all units Ganesh may have touched (uses up to GL_TEXTURE31)
+        glStencilMask(1);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        glStencilFunc(GL_ALWAYS, 0, 1);
+        glClearColor(0, 0, 0, 0);
+
+        // Unbind textures/samplers on all units
         for (int i = 31; i >= 0; i--) {
             glActiveTexture(GL_TEXTURE0 + i);
             glBindTexture(GL_TEXTURE_2D, 0);
             glBindSampler(i, 0);
         }
-        // Leave on unit 0
         glActiveTexture(GL_TEXTURE0);
+
+        // Disable all vertex attrib arrays
+        for (int i = 0; i < 8; i++)
+            glDisableVertexAttribArray(i);
+
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         glPixelStorei(GL_PACK_ALIGNMENT, 4);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         glPixelStorei(GL_PACK_ROW_LENGTH, 0);
-        glClearColor(0, 0, 0, 0);
-        glViewport(0, 0, blit_w, blit_h);
 
         video_cb(RETRO_HW_FRAME_BUFFER_VALID, blit_w, blit_h, 0);
     } else {
