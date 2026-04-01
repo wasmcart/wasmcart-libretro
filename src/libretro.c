@@ -197,6 +197,17 @@ void retro_deinit(void) {
 bool retro_load_game(const struct retro_game_info* game) {
     if (!host || !game || !game->path) return false;
 
+    // Set up file logging next to the cart (Android: logcat buffer too small)
+    {
+        const char* slash = strrchr(game->path, '/');
+        if (slash) {
+            size_t dir_len = (size_t)(slash - game->path);
+            char log_path[1024];
+            snprintf(log_path, sizeof(log_path), "%.*s/wasmcart.log", (int)dir_len, game->path);
+            wc_log_set_file(log_path);
+        }
+    }
+
     // Set pixel format for 2D carts
     enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_XRGB8888;
     environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt);
