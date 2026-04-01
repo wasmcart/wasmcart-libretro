@@ -62,12 +62,16 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
+      - name: Download ANGLE headers
+        run: |
+          mkdir -p deps/angle
+          curl -sL https://github.com/kivy/angle-builder/releases/download/chromium-7151_rev1/angle-macos-x64.tar.gz | tar xz -C deps/angle
       - name: Download libnode
         run: |
           mkdir -p deps/libnode
           curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-macos-x86_64.tar.gz | tar xz -C deps/libnode
       - name: Build
-        run: mkdir build && cd build && cmake .. && make -j$(sysctl -n hw.ncpu)
+        run: mkdir build && cd build && cmake .. -DANGLE_DIR=../deps/angle && make -j$(sysctl -n hw.ncpu)
       - name: Package
         run: |
           strip -x build/wasmcart_libretro.dylib
@@ -83,12 +87,16 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
+      - name: Download ANGLE headers
+        run: |
+          mkdir -p deps/angle
+          curl -sL https://github.com/kivy/angle-builder/releases/download/chromium-7151_rev1/angle-macos-arm64.tar.gz | tar xz -C deps/angle
       - name: Download libnode
         run: |
           mkdir -p deps/libnode
           curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-macos-aarch64.tar.gz | tar xz -C deps/libnode
       - name: Build
-        run: mkdir build && cd build && cmake .. && make -j$(sysctl -n hw.ncpu)
+        run: mkdir build && cd build && cmake .. -DANGLE_DIR=../deps/angle && make -j$(sysctl -n hw.ncpu)
       - name: Package
         run: |
           strip -x build/wasmcart_libretro.dylib
@@ -105,6 +113,15 @@ jobs:
         with:
           submodules: recursive
       - uses: ilammy/msvc-dev-cmd@v1
+      - name: Download ANGLE headers
+        shell: bash
+        run: |
+          curl -sL https://github.com/mmozeiko/build-angle/releases/download/2026-03-01/angle-x64-2026-03-01.zip -o angle.zip
+          unzip -q angle.zip -d deps/angle_tmp
+          mkdir -p deps/angle/include
+          ADIR=$(ls deps/angle_tmp | head -1)
+          cp -r deps/angle_tmp/$ADIR/include/* deps/angle/include/
+          rm -rf deps/angle_tmp
       - name: Download libnode
         shell: bash
         run: |
@@ -116,7 +133,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release -DLIBNODE_DIR=..\deps\libnode
+          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release -DLIBNODE_DIR=..\deps\libnode -DANGLE_DIR=..\deps\angle
           ninja
       - name: Package
         shell: bash

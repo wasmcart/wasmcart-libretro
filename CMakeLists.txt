@@ -47,12 +47,17 @@ target_include_directories(wasmcart_libretro PRIVATE
     ${LIBNODE_DIR}/include
 )
 
+# GLES3/EGL headers — system on Linux/Android, ANGLE on macOS/Windows
+set(ANGLE_DIR "" CACHE PATH "Path to ANGLE headers (macOS/Windows)")
+if(ANGLE_DIR AND EXISTS "${ANGLE_DIR}/include")
+    target_include_directories(wasmcart_libretro PRIVATE ${ANGLE_DIR}/include)
+endif()
+
 # libnode
 if(WIN32)
-    target_link_options(wasmcart_libretro PRIVATE
-        "/WHOLEARCHIVE:${LIBNODE_DIR}/libnode.lib"
-        "/FORCE:MULTIPLE")
     target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.lib winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt)
+elseif(ANDROID)
+    target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a dl m log)
 else()
     target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a pthread dl m)
 endif()
