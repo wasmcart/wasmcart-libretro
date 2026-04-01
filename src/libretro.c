@@ -45,8 +45,8 @@ void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
 
 // ─── Core options ───────────────────────────────────────────────────────────
 
-static uint32_t pref_width = 0;   // 0 = let cart decide
-static uint32_t pref_height = 0;
+static uint32_t pref_width = 1920;
+static uint32_t pref_height = 1080;
 
 static const struct retro_core_option_v2_definition option_defs[] = {
     {
@@ -56,7 +56,6 @@ static const struct retro_core_option_v2_definition option_defs[] = {
         "Resolution passed to the cart. The cart decides its actual render size.",
         NULL, "video",
         {
-            { "auto",      "Auto (cart default)" },
             { "640x480",   "640x480" },
             { "1280x720",  "1280x720 (720p)" },
             { "1920x1080", "1920x1080 (1080p)" },
@@ -64,7 +63,7 @@ static const struct retro_core_option_v2_definition option_defs[] = {
             { "3840x2160", "3840x2160 (4K)" },
             { NULL, NULL },
         },
-        "auto"
+        "1920x1080"
     },
     { NULL, NULL, NULL, NULL, NULL, NULL, {{0}}, NULL },
 };
@@ -77,15 +76,10 @@ static const struct retro_core_options_v2 options_v2 = {
 static void check_options(void) {
     struct retro_variable var = { "wasmcart_resolution", NULL };
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
-        if (strcmp(var.value, "auto") == 0) {
-            pref_width = 0;
-            pref_height = 0;
-        } else {
-            unsigned w = 0, h = 0;
-            if (sscanf(var.value, "%ux%u", &w, &h) == 2 && w > 0 && h > 0) {
-                pref_width = w;
-                pref_height = h;
-            }
+        unsigned w = 0, h = 0;
+        if (sscanf(var.value, "%ux%u", &w, &h) == 2 && w > 0 && h > 0) {
+            pref_width = w;
+            pref_height = h;
         }
     }
 }
@@ -121,8 +115,8 @@ void retro_get_system_av_info(struct retro_system_av_info* info) {
     memset(info, 0, sizeof(*info));
     info->geometry.base_width = cart_w;
     info->geometry.base_height = cart_h;
-    info->geometry.max_width = pref_width ? pref_width : 1920;
-    info->geometry.max_height = pref_height ? pref_height : 1080;
+    info->geometry.max_width = pref_width;
+    info->geometry.max_height = pref_height;
     info->geometry.aspect_ratio = (float)cart_w / (float)cart_h;
     info->timing.fps = 60.0;
 
@@ -146,16 +140,11 @@ static void on_context_reset(void) {
 
     // Now GL is available — finish deferred init
     if (host) {
-        // Finish cart init first so we know the cart's actual dimensions
         // Create redirect FBO with depth+stencil BEFORE cart init.
         // Three.js needs depth testing, Ganesh needs stencil.
         // RetroArch's hw_render FBO may not have these attachments.
         extern void wc_gl_setup_redirect(uint32_t w, uint32_t h);
-
-        // Use preferred if set, otherwise a safe default for initial FBO
-        uint32_t init_w = pref_width ? pref_width : 1280;
-        uint32_t init_h = pref_height ? pref_height : 720;
-        wc_gl_setup_redirect(init_w, init_h);
+        wc_gl_setup_redirect(pref_width, pref_height);
 
         wc_host_finish_init(host);
 
@@ -164,11 +153,8 @@ static void on_context_reset(void) {
         cart_w = ci->width;
         cart_h = ci->height;
 
-        // Use cart dimensions if no preferred resolution set
-        uint32_t redir_w = pref_width ? pref_width : cart_w;
-        uint32_t redir_h = pref_height ? pref_height : cart_h;
-        // Resize redirect FBO to actual dimensions
-        wc_gl_setup_redirect(redir_w, redir_h);
+        uint32_t redir_w = pref_width;
+        uint32_t redir_h = pref_height;
 
         // Update full AV info — SET_GEOMETRY alone won't resize RetroArch's FBO
         struct retro_system_av_info av = {0};
@@ -369,18 +355,6 @@ void retro_run(void) {
     if (uses_gl) {
         extern void wc_gl_rebind_redirect(void);
         wc_gl_rebind_redirect();
-        // Restore GL defaults the cart expects (our post-frame reset changes these)
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glStencilMask(0xFF);
-        glStencilFunc(GL_ALWAYS, 0, 0xFF);
-        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-        glDepthMask(GL_TRUE);
-        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_STENCIL_TEST);
-        glDisable(GL_SCISSOR_TEST);
-        glDisable(GL_CULL_FACE);
     }
     wc_host_run_frame(host);
 
@@ -397,47 +371,13 @@ void retro_run(void) {
         extern void wc_gl_get_blit_size(uint32_t* w, uint32_t* h);
         uint32_t blit_w = 0, blit_h = 0;
         wc_gl_get_blit_size(&blit_w, &blit_h);
-        if (!blit_w) blit_w = cart_w;
-        if (!blit_h) blit_h = cart_h;
+        if (!blit_w) blit_w = pref_width;
+        if (!blit_h) blit_h = pref_height;
 
         if (wc_gl_has_redirect()) {
             extern void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h, int flip_y);
             wc_gl_blit_to_fbo((uint32_t)ra_fbo, blit_w, blit_h, blit_w, blit_h, 0);
         }
-
-        // Reset GL state to match glsm STATE_UNBIND defaults.
-        // RetroArch expects clean default GL state before video_cb.
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glUseProgram(0);
-        glBindVertexArray(0);
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_STENCIL_TEST);
-        glDisable(GL_SCISSOR_TEST);
-        glDisable(GL_CULL_FACE);
-        glDisable(GL_BLEND);
-        glDisable(GL_DITHER);
-        glBlendFunc(GL_ONE, GL_ZERO);
-        glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ONE, GL_ZERO);
-        glDepthMask(GL_TRUE);
-        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glStencilMask(0xFF);
-        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-        glStencilFunc(GL_ALWAYS, 0, 0xFF);
-        for (int i = 31; i >= 0; i--) {
-            glActiveTexture(GL_TEXTURE0 + i);
-            glBindTexture(GL_TEXTURE_2D, 0);
-            glBindSampler(i, 0);
-        }
-        glActiveTexture(GL_TEXTURE0);
-        for (int i = 0; i < 8; i++)
-            glDisableVertexAttribArray(i);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        glPixelStorei(GL_PACK_ALIGNMENT, 4);
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-        glPixelStorei(GL_PACK_ROW_LENGTH, 0);
-
         video_cb(RETRO_HW_FRAME_BUFFER_VALID, blit_w, blit_h, 0);
     } else {
         // 2D cart — pass framebuffer to RetroArch
