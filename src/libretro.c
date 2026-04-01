@@ -362,8 +362,8 @@ void retro_run(void) {
         if (!blit_h) blit_h = pref_height;
 
         if (wc_gl_has_redirect()) {
-            extern void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h);
-            wc_gl_blit_to_fbo((uint32_t)ra_fbo, blit_w, blit_h, blit_w, blit_h);
+            extern void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h, int flip_y);
+            wc_gl_blit_to_fbo((uint32_t)ra_fbo, blit_w, blit_h, blit_w, blit_h, 0);
         }
         video_cb(RETRO_HW_FRAME_BUFFER_VALID, blit_w, blit_h, 0);
     } else {
