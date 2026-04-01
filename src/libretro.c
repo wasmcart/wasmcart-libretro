@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <math.h>
 #include <GLES3/gl3.h>
+#include <wc_log.h>
 
 // ─── Libretro callbacks ─────────────────────────────────────────────────────
 
@@ -166,7 +167,7 @@ static void on_context_reset(void) {
         const wc_cart_info_t* ci2 = wc_host_get_cart_info(host);
         av.timing.sample_rate = ci2->audio_sample_rate ? (double)ci2->audio_sample_rate : 48000.0;
         environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
-        fprintf(stderr, "wasmcart: SET_SYSTEM_AV_INFO %ux%u\n", redir_w, redir_h);
+        wc_log( "wasmcart: SET_SYSTEM_AV_INFO %ux%u\n", redir_w, redir_h);
     }
 }
 
