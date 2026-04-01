@@ -45,8 +45,8 @@ void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
 
 // ─── Core options ───────────────────────────────────────────────────────────
 
-static uint32_t pref_width = 1920;
-static uint32_t pref_height = 1080;
+static uint32_t pref_width = 0;   // 0 = let cart decide
+static uint32_t pref_height = 0;
 
 static const struct retro_core_option_v2_definition option_defs[] = {
     {
@@ -115,8 +115,8 @@ void retro_get_system_av_info(struct retro_system_av_info* info) {
     memset(info, 0, sizeof(*info));
     info->geometry.base_width = cart_w;
     info->geometry.base_height = cart_h;
-    info->geometry.max_width = pref_width;
-    info->geometry.max_height = pref_height;
+    info->geometry.max_width = pref_width ? pref_width : 1920;
+    info->geometry.max_height = pref_height ? pref_height : 1080;
     info->geometry.aspect_ratio = (float)cart_w / (float)cart_h;
     info->timing.fps = 60.0;
 
@@ -140,11 +140,16 @@ static void on_context_reset(void) {
 
     // Now GL is available — finish deferred init
     if (host) {
+        // Finish cart init first so we know the cart's actual dimensions
         // Create redirect FBO with depth+stencil BEFORE cart init.
         // Three.js needs depth testing, Ganesh needs stencil.
         // RetroArch's hw_render FBO may not have these attachments.
         extern void wc_gl_setup_redirect(uint32_t w, uint32_t h);
-        wc_gl_setup_redirect(pref_width, pref_height);
+
+        // Use preferred if set, otherwise a safe default for initial FBO
+        uint32_t init_w = pref_width ? pref_width : 1280;
+        uint32_t init_h = pref_height ? pref_height : 720;
+        wc_gl_setup_redirect(init_w, init_h);
 
         wc_host_finish_init(host);
 
@@ -153,8 +158,11 @@ static void on_context_reset(void) {
         cart_w = ci->width;
         cart_h = ci->height;
 
-        uint32_t redir_w = pref_width;
-        uint32_t redir_h = pref_height;
+        // Use cart dimensions if no preferred resolution set
+        uint32_t redir_w = pref_width ? pref_width : cart_w;
+        uint32_t redir_h = pref_height ? pref_height : cart_h;
+        // Resize redirect FBO to actual dimensions
+        wc_gl_setup_redirect(redir_w, redir_h);
 
         // Update full AV info — SET_GEOMETRY alone won't resize RetroArch's FBO
         struct retro_system_av_info av = {0};
@@ -167,7 +175,7 @@ static void on_context_reset(void) {
         const wc_cart_info_t* ci2 = wc_host_get_cart_info(host);
         av.timing.sample_rate = ci2->audio_sample_rate ? (double)ci2->audio_sample_rate : 48000.0;
         environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
-        wc_log( "wasmcart: SET_SYSTEM_AV_INFO %ux%u\n", redir_w, redir_h);
+        wc_log("wasmcart: SET_SYSTEM_AV_INFO %ux%u\n", redir_w, redir_h);
     }
 }
 
@@ -355,6 +363,18 @@ void retro_run(void) {
     if (uses_gl) {
         extern void wc_gl_rebind_redirect(void);
         wc_gl_rebind_redirect();
+        // Restore GL defaults the cart expects (our post-frame reset changes these)
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glStencilMask(0xFF);
+        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        glDepthMask(GL_TRUE);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_STENCIL_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_CULL_FACE);
     }
     wc_host_run_frame(host);
 
@@ -371,8 +391,8 @@ void retro_run(void) {
         extern void wc_gl_get_blit_size(uint32_t* w, uint32_t* h);
         uint32_t blit_w = 0, blit_h = 0;
         wc_gl_get_blit_size(&blit_w, &blit_h);
-        if (!blit_w) blit_w = pref_width;
-        if (!blit_h) blit_h = pref_height;
+        if (!blit_w) blit_w = cart_w;
+        if (!blit_h) blit_h = cart_h;
 
         if (wc_gl_has_redirect()) {
             extern void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h, int flip_y);
@@ -384,40 +404,27 @@ void retro_run(void) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glUseProgram(0);
         glBindVertexArray(0);
-
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_STENCIL_TEST);
         glDisable(GL_SCISSOR_TEST);
         glDisable(GL_CULL_FACE);
         glDisable(GL_BLEND);
         glDisable(GL_DITHER);
-        glDisable(GL_POLYGON_OFFSET_FILL);
-
         glBlendFunc(GL_ONE, GL_ZERO);
         glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ONE, GL_ZERO);
-        glBlendEquation(GL_FUNC_ADD);
-        glCullFace(GL_BACK);
-        glFrontFace(GL_CCW);
-        glDepthFunc(GL_LESS);
         glDepthMask(GL_TRUE);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glStencilMask(0xFF);
         glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
         glStencilFunc(GL_ALWAYS, 0, 0xFF);
-        glClearColor(0, 0, 0, 0);
-
-        // Unbind textures/samplers on all units
         for (int i = 31; i >= 0; i--) {
             glActiveTexture(GL_TEXTURE0 + i);
             glBindTexture(GL_TEXTURE_2D, 0);
             glBindSampler(i, 0);
         }
         glActiveTexture(GL_TEXTURE0);
-
-        // Disable all vertex attrib arrays
         for (int i = 0; i < 8; i++)
             glDisableVertexAttribArray(i);
-
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
