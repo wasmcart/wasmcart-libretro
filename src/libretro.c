@@ -384,13 +384,20 @@ void retro_run(void) {
         glDisable(GL_STENCIL_TEST);
         glDisable(GL_SCISSOR_TEST);
         glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
         glDepthMask(GL_FALSE);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glUseProgram(0);
         glBindVertexArray(0);
         glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        // Unbind samplers — Ganesh binds custom samplers that corrupt RetroArch's textures
+        for (int i = 0; i < 4; i++)
+            glBindSampler(i, 0);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glPixelStorei(GL_PACK_ALIGNMENT, 4);
 
         video_cb(RETRO_HW_FRAME_BUFFER_VALID, blit_w, blit_h, 0);
     } else {
