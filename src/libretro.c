@@ -365,6 +365,22 @@ void retro_run(void) {
             extern void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h, int flip_y);
             wc_gl_blit_to_fbo((uint32_t)ra_fbo, blit_w, blit_h, blit_w, blit_h, 0);
         }
+
+        // Reset GL state so RetroArch's overlay/HUD renders correctly.
+        // Carts (especially Ganesh) leave state dirty after rendering.
+        glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)ra_fbo);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_STENCIL_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_CULL_FACE);
+        glDepthMask(GL_FALSE);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glUseProgram(0);
+        glBindVertexArray(0);
+        glActiveTexture(GL_TEXTURE0);
+
         video_cb(RETRO_HW_FRAME_BUFFER_VALID, blit_w, blit_h, 0);
     } else {
         // 2D cart — pass framebuffer to RetroArch
