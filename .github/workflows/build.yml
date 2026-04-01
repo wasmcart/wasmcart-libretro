@@ -62,10 +62,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-      - name: Download ANGLE headers
+      - name: Download ANGLE
         run: |
-          mkdir -p deps/angle
+          mkdir -p deps/angle/lib
           curl -sL https://github.com/kivy/angle-builder/releases/download/chromium-7151_rev1/angle-macos-x64.tar.gz | tar xz -C deps/angle
+          find deps/angle -maxdepth 1 -name '*.dylib' -exec mv {} deps/angle/lib/ \;
       - name: Download libnode
         run: |
           mkdir -p deps/libnode
@@ -87,10 +88,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-      - name: Download ANGLE headers
+      - name: Download ANGLE
         run: |
-          mkdir -p deps/angle
+          mkdir -p deps/angle/lib
           curl -sL https://github.com/kivy/angle-builder/releases/download/chromium-7151_rev1/angle-macos-arm64.tar.gz | tar xz -C deps/angle
+          find deps/angle -maxdepth 1 -name '*.dylib' -exec mv {} deps/angle/lib/ \;
       - name: Download libnode
         run: |
           mkdir -p deps/libnode

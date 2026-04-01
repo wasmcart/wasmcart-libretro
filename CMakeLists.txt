@@ -66,7 +66,7 @@ endif()
 if(WIN32)
     target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.lib winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt)
 elseif(ANDROID)
-    target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a dl m log GLESv2 EGL android)
+    target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a dl m log GLESv3 EGL android)
 elseif(APPLE)
     target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a pthread dl m
         "-framework CoreFoundation" "-framework Security" "-framework SystemConfiguration")
