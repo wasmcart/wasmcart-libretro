@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <math.h>
+#include <time.h>
 #include <GLES3/gl3.h>
 #include <wc_log.h>
 
@@ -453,11 +454,20 @@ void retro_run(void) {
     }
     wc_host_set_pads(host, pads);
 
-    // 3. Set time (RetroArch doesn't give wall clock — derive from frame count)
-    double delta_ms = 1000.0 / 60.0;
-    time_ms += delta_ms;
-    wc_host_set_time(host, time_ms, delta_ms, frame_count);
-    frame_count++;
+    // 3. Set time using real wall clock
+    {
+        static struct timespec last_ts = {0};
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double now_ms = now.tv_sec * 1000.0 + now.tv_nsec / 1000000.0;
+        double last_ms = last_ts.tv_sec * 1000.0 + last_ts.tv_nsec / 1000000.0;
+        double delta_ms = (last_ts.tv_sec == 0) ? (1000.0 / 60.0) : (now_ms - last_ms);
+        if (delta_ms <= 0.0 || delta_ms > 200.0) delta_ms = 1000.0 / 60.0;
+        time_ms += delta_ms;
+        last_ts = now;
+        wc_host_set_time(host, time_ms, delta_ms, frame_count);
+        frame_count++;
+    }
 
     // 4. Run one frame — restore cart's GL state before rendering
     if (gl_context_ready) {
