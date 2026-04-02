@@ -266,8 +266,10 @@ static void on_context_reset(void) {
         cart_w = ci->width;
         cart_h = ci->height;
 
-        uint32_t redir_w = pref_width;
-        uint32_t redir_h = pref_height;
+        // Use cart's actual resolution (may differ from pref if cart overrides)
+        uint32_t redir_w = cart_w > pref_width ? cart_w : pref_width;
+        uint32_t redir_h = cart_h > pref_height ? cart_h : pref_height;
+        wc_gl_setup_redirect(redir_w, redir_h);
 
         // Update full AV info — SET_GEOMETRY alone won't resize RetroArch's FBO
         struct retro_system_av_info av = {0};
@@ -454,20 +456,11 @@ void retro_run(void) {
     }
     wc_host_set_pads(host, pads);
 
-    // 3. Set time using real wall clock
-    {
-        static struct timespec last_ts = {0};
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        double now_ms = now.tv_sec * 1000.0 + now.tv_nsec / 1000000.0;
-        double last_ms = last_ts.tv_sec * 1000.0 + last_ts.tv_nsec / 1000000.0;
-        double delta_ms = (last_ts.tv_sec == 0) ? (1000.0 / 60.0) : (now_ms - last_ms);
-        if (delta_ms <= 0.0 || delta_ms > 200.0) delta_ms = 1000.0 / 60.0;
-        time_ms += delta_ms;
-        last_ts = now;
-        wc_host_set_time(host, time_ms, delta_ms, frame_count);
-        frame_count++;
-    }
+    // 3. Set time — fixed 60fps delta (RetroArch controls frame rate + audio sync)
+    double delta_ms = 1000.0 / 60.0;
+    time_ms += delta_ms;
+    wc_host_set_time(host, time_ms, delta_ms, frame_count);
+    frame_count++;
 
     // 4. Run one frame — restore cart's GL state before rendering
     if (gl_context_ready) {
@@ -500,8 +493,8 @@ void retro_run(void) {
         extern void wc_gl_get_blit_size(uint32_t* w, uint32_t* h);
         uint32_t blit_w = 0, blit_h = 0;
         wc_gl_get_blit_size(&blit_w, &blit_h);
-        if (!blit_w) blit_w = pref_width;
-        if (!blit_h) blit_h = pref_height;
+        if (!blit_w) blit_w = cart_w > pref_width ? cart_w : pref_width;
+        if (!blit_h) blit_h = cart_h > pref_height ? cart_h : pref_height;
 
         if (wc_gl_has_redirect()) {
             extern void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h, int flip_y);
