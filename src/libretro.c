@@ -123,6 +123,8 @@ static void restore_cart_gl_state(void) {
 }
 
 static void reset_gl_for_retroarch(void) {
+    // Minimal reset — only state RetroArch's overlay renderer needs.
+    // Don't touch textures, samplers, buffers — carts cache those.
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glUseProgram(0);
     glBindVertexArray(0);
@@ -136,16 +138,7 @@ static void reset_gl_for_retroarch(void) {
     glDepthMask(GL_TRUE);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glStencilMask(0xFF);
-    for (int i = 31; i >= 0; i--) {
-        glActiveTexture(GL_TEXTURE0 + i);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glBindSampler(i, 0);
-    }
     glActiveTexture(GL_TEXTURE0);
-    for (int i = 0; i < 8; i++)
-        glDisableVertexAttribArray(i);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
 // ─── Callbacks ──────────────────────────────────────────────────────────────
