@@ -240,41 +240,37 @@ bool retro_load_game(const struct retro_game_info* game) {
     if (log_cb) log_cb(RETRO_LOG_INFO, "wasmcart: loaded %s (%ux%u, %s)\n",
         manifest->name, cart_w, cart_h, uses_gl ? "GL" : "2D");
 
-    // Request HW render for GL carts
-    if (uses_gl) {
-        // Try OpenGL Core 3.3 first (desktop), then GLES3, then GLES2
-        memset(&hw_render, 0, sizeof(hw_render));
-        hw_render.context_reset = on_context_reset;
-        hw_render.context_destroy = on_context_destroy;
-        hw_render.bottom_left_origin = true;
-        hw_render.depth = true;
-        hw_render.stencil = true;
+    // Always request HW render — unified GL display path for all carts.
+    // 2D carts get their framebuffer uploaded to the redirect FBO as a texture.
+    memset(&hw_render, 0, sizeof(hw_render));
+    hw_render.context_reset = on_context_reset;
+    hw_render.context_destroy = on_context_destroy;
+    hw_render.bottom_left_origin = true;
+    hw_render.depth = true;
+    hw_render.stencil = true;
 
-        // Prefer GLES3 — wasmcart carts expect ES 3.0 (precision qualifiers, etc.)
-        // Core 3.3 context rejects ES-specific GLSL syntax
-        bool got_context = false;
-        hw_render.context_type = RETRO_HW_CONTEXT_OPENGLES3;
+    bool got_context = false;
+    hw_render.context_type = RETRO_HW_CONTEXT_OPENGLES3;
+    hw_render.version_major = 3;
+    hw_render.version_minor = 0;
+    if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
+        got_context = true;
+    } else {
+        hw_render.context_type = RETRO_HW_CONTEXT_OPENGL_CORE;
         hw_render.version_major = 3;
-        hw_render.version_minor = 0;
+        hw_render.version_minor = 3;
         if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
             got_context = true;
         } else {
-            hw_render.context_type = RETRO_HW_CONTEXT_OPENGL_CORE;
-            hw_render.version_major = 3;
-            hw_render.version_minor = 3;
-            if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
-                got_context = true;
-            } else {
-                hw_render.context_type = RETRO_HW_CONTEXT_OPENGLES2;
-                hw_render.version_major = 2;
-                hw_render.version_minor = 0;
-                got_context = environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render);
-            }
+            hw_render.context_type = RETRO_HW_CONTEXT_OPENGLES2;
+            hw_render.version_major = 2;
+            hw_render.version_minor = 0;
+            got_context = environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render);
         }
-        if (!got_context) {
-            if (log_cb) log_cb(RETRO_LOG_ERROR, "wasmcart: failed to get HW render context\n");
-            return false;
-        }
+    }
+    if (!got_context) {
+        if (log_cb) log_cb(RETRO_LOG_ERROR, "wasmcart: failed to get HW render context\n");
+        return false;
     }
 
     frame_count = 0;
@@ -297,10 +293,10 @@ void retro_unload_game(void) {
 void retro_run(void) {
     if (!host || wc_host_has_trapped(host)) return;
 
-    // Finish deferred init on first frame (2D carts that don't get context_reset)
+    // Safety fallback: finish init if context_reset wasn't called
     if (first_frame) {
         first_frame = false;
-        if (!uses_gl) {
+        if (!gl_context_ready) {
             wc_host_finish_init(host);
             const wc_cart_info_t* ci = wc_host_get_cart_info(host);
             cart_w = ci->width;
@@ -352,7 +348,7 @@ void retro_run(void) {
     frame_count++;
 
     // 4. Run one frame
-    if (uses_gl) {
+    if (gl_context_ready) {
         extern void wc_gl_rebind_redirect(void);
         wc_gl_rebind_redirect();
     }
@@ -363,9 +359,19 @@ void retro_run(void) {
         return;
     }
 
-    // 5. Present video
-    if (uses_gl && hw_render.get_current_framebuffer) {
+    // 5. Present video — unified GL path for all carts
+    if (hw_render.get_current_framebuffer) {
         uintptr_t ra_fbo = hw_render.get_current_framebuffer();
+
+        // For 2D carts: upload framebuffer pixels to redirect FBO as texture
+        if (!uses_gl) {
+            uint32_t fb_w, fb_h;
+            const uint8_t* fb = wc_host_get_framebuffer(host, &fb_w, &fb_h);
+            if (fb && fb_w > 0 && fb_h > 0) {
+                extern void wc_gl_upload_framebuffer(const uint8_t* pixels, uint32_t w, uint32_t h);
+                wc_gl_upload_framebuffer(fb, fb_w, fb_h);
+            }
+        }
 
         extern int wc_gl_has_redirect(void);
         extern void wc_gl_get_blit_size(uint32_t* w, uint32_t* h);
@@ -375,48 +381,10 @@ void retro_run(void) {
         if (!blit_h) blit_h = pref_height;
 
         if (wc_gl_has_redirect()) {
-            // Debug: check if redirect FBO has content before blit
-            if (frame_count == 10) {
-                extern int wc_gl_get_redirect_fbo(void);
-                GLuint redir = (GLuint)wc_gl_get_redirect_fbo();
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, redir);
-                // Read center of redirect FBO
-                uint8_t px[4] = {0};
-                glReadPixels(blit_w/2, blit_h/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-                wc_log("wasmcart: redirect FBO center(%u,%u): R=%d G=%d B=%d A=%d (fbo=%u, %ux%u)\n",
-                    blit_w/2, blit_h/2, px[0], px[1], px[2], px[3], redir, blit_w, blit_h);
-                // Read at cart's own resolution center
-                uint8_t px2[4] = {0};
-                glReadPixels(cart_w/2, cart_h/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px2);
-                wc_log("wasmcart: redirect FBO cart-center(%u,%u): R=%d G=%d B=%d A=%d\n",
-                    cart_w/2, cart_h/2, px2[0], px2[1], px2[2], px2[3]);
-                // Read at origin area
-                uint8_t px3[4] = {0};
-                glReadPixels(10, 10, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px3);
-                wc_log("wasmcart: redirect FBO origin(10,10): R=%d G=%d B=%d A=%d\n",
-                    px3[0], px3[1], px3[2], px3[3]);
-                GLenum err = glGetError();
-                if (err) wc_log("wasmcart: GL error after readback: 0x%04x\n", err);
-            }
             extern void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h, int flip_y);
             wc_gl_blit_to_fbo((uint32_t)ra_fbo, blit_w, blit_h, blit_w, blit_h, 0);
-            if (frame_count == 10) {
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)ra_fbo);
-                uint8_t px[4] = {0};
-                glReadPixels(blit_w/2, blit_h/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-                wc_log("wasmcart: RA FBO center pixel: R=%d G=%d B=%d A=%d (fbo=%lu)\n",
-                    px[0], px[1], px[2], px[3], (unsigned long)ra_fbo);
-            }
         }
         video_cb(RETRO_HW_FRAME_BUFFER_VALID, blit_w, blit_h, 0);
-    } else {
-        // 2D cart — pass framebuffer to RetroArch
-        uint32_t w, h;
-        const uint8_t* fb = wc_host_get_framebuffer(host, &w, &h);
-        if (fb && w > 0 && h > 0) {
-            // wasmcart ARGB8888 = RetroArch XRGB8888 (same layout)
-            video_cb(fb, w, h, w * 4);
-        }
     }
 
     // 6. Send audio
