@@ -35,6 +35,118 @@ static double time_ms = 0;
 static int16_t* audio_conv_buf = NULL;
 static uint32_t audio_conv_cap = 0;
 
+// ─── GL state save/restore ──────────────────────────────────────────────────
+// Save cart's GL state after each frame, restore before next frame.
+// RetroArch modifies GL state between retro_run calls (overlay/menu).
+// Without save/restore, carts with internal GL state caches (Ganesh, gl4es,
+// chromium_bsu's gl_compat) see stale state and render nothing.
+
+static struct {
+    GLint program;
+    GLint vao;
+    GLint fbo;
+    GLint active_tex;
+    GLint tex_2d;
+    GLint array_buf;
+    GLint elem_buf;
+    GLint viewport[4];
+    GLboolean blend;
+    GLboolean depth_test;
+    GLboolean scissor_test;
+    GLboolean stencil_test;
+    GLboolean cull_face;
+    GLboolean dither;
+    GLint blend_src_rgb, blend_dst_rgb, blend_src_a, blend_dst_a;
+    GLint blend_eq_rgb, blend_eq_a;
+    GLboolean depth_mask;
+    GLboolean color_mask[4];
+    GLint stencil_mask;
+    GLfloat clear_color[4];
+    bool saved;
+} cart_gl_state = {0};
+
+static void save_cart_gl_state(void) {
+    glGetIntegerv(GL_CURRENT_PROGRAM, &cart_gl_state.program);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &cart_gl_state.vao);
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &cart_gl_state.fbo);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &cart_gl_state.active_tex);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &cart_gl_state.tex_2d);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &cart_gl_state.array_buf);
+    glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &cart_gl_state.elem_buf);
+    glGetIntegerv(GL_VIEWPORT, cart_gl_state.viewport);
+    cart_gl_state.blend = glIsEnabled(GL_BLEND);
+    cart_gl_state.depth_test = glIsEnabled(GL_DEPTH_TEST);
+    cart_gl_state.scissor_test = glIsEnabled(GL_SCISSOR_TEST);
+    cart_gl_state.stencil_test = glIsEnabled(GL_STENCIL_TEST);
+    cart_gl_state.cull_face = glIsEnabled(GL_CULL_FACE);
+    cart_gl_state.dither = glIsEnabled(GL_DITHER);
+    glGetIntegerv(GL_BLEND_SRC_RGB, &cart_gl_state.blend_src_rgb);
+    glGetIntegerv(GL_BLEND_DST_RGB, &cart_gl_state.blend_dst_rgb);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &cart_gl_state.blend_src_a);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &cart_gl_state.blend_dst_a);
+    glGetIntegerv(GL_BLEND_EQUATION_RGB, &cart_gl_state.blend_eq_rgb);
+    glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &cart_gl_state.blend_eq_a);
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &cart_gl_state.depth_mask);
+    glGetBooleanv(GL_COLOR_WRITEMASK, cart_gl_state.color_mask);
+    glGetIntegerv(GL_STENCIL_WRITEMASK, &cart_gl_state.stencil_mask);
+    glGetFloatv(GL_COLOR_CLEAR_VALUE, cart_gl_state.clear_color);
+    cart_gl_state.saved = true;
+}
+
+static void restore_cart_gl_state(void) {
+    if (!cart_gl_state.saved) return;
+    glUseProgram(cart_gl_state.program);
+    glBindVertexArray(cart_gl_state.vao);
+    glBindFramebuffer(GL_FRAMEBUFFER, cart_gl_state.fbo);
+    glActiveTexture(cart_gl_state.active_tex);
+    glBindTexture(GL_TEXTURE_2D, cart_gl_state.tex_2d);
+    glBindBuffer(GL_ARRAY_BUFFER, cart_gl_state.array_buf);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, cart_gl_state.elem_buf);
+    glViewport(cart_gl_state.viewport[0], cart_gl_state.viewport[1],
+               cart_gl_state.viewport[2], cart_gl_state.viewport[3]);
+    if (cart_gl_state.blend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+    if (cart_gl_state.depth_test) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+    if (cart_gl_state.scissor_test) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+    if (cart_gl_state.stencil_test) glEnable(GL_STENCIL_TEST); else glDisable(GL_STENCIL_TEST);
+    if (cart_gl_state.cull_face) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+    if (cart_gl_state.dither) glEnable(GL_DITHER); else glDisable(GL_DITHER);
+    glBlendFuncSeparate(cart_gl_state.blend_src_rgb, cart_gl_state.blend_dst_rgb,
+                        cart_gl_state.blend_src_a, cart_gl_state.blend_dst_a);
+    glBlendEquationSeparate(cart_gl_state.blend_eq_rgb, cart_gl_state.blend_eq_a);
+    glDepthMask(cart_gl_state.depth_mask);
+    glColorMask(cart_gl_state.color_mask[0], cart_gl_state.color_mask[1],
+                cart_gl_state.color_mask[2], cart_gl_state.color_mask[3]);
+    glStencilMask(cart_gl_state.stencil_mask);
+    glClearColor(cart_gl_state.clear_color[0], cart_gl_state.clear_color[1],
+                 cart_gl_state.clear_color[2], cart_gl_state.clear_color[3]);
+}
+
+static void reset_gl_for_retroarch(void) {
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glUseProgram(0);
+    glBindVertexArray(0);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    glDisable(GL_DITHER);
+    glBlendFunc(GL_ONE, GL_ZERO);
+    glDepthMask(GL_TRUE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glStencilMask(0xFF);
+    for (int i = 31; i >= 0; i--) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindSampler(i, 0);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    for (int i = 0; i < 8; i++)
+        glDisableVertexAttribArray(i);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+}
+
 // ─── Callbacks ──────────────────────────────────────────────────────────────
 
 void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }
@@ -347,8 +459,9 @@ void retro_run(void) {
     wc_host_set_time(host, time_ms, delta_ms, frame_count);
     frame_count++;
 
-    // 4. Run one frame
+    // 4. Run one frame — restore cart's GL state before rendering
     if (gl_context_ready) {
+        restore_cart_gl_state();
         extern void wc_gl_rebind_redirect(void);
         wc_gl_rebind_redirect();
     }
@@ -384,6 +497,11 @@ void retro_run(void) {
             extern void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h, int flip_y);
             wc_gl_blit_to_fbo((uint32_t)ra_fbo, blit_w, blit_h, blit_w, blit_h, 0);
         }
+
+        // Save cart's GL state, then reset for RetroArch overlay/menu
+        save_cart_gl_state();
+        reset_gl_for_retroarch();
+
         video_cb(RETRO_HW_FRAME_BUFFER_VALID, blit_w, blit_h, 0);
     }
 
