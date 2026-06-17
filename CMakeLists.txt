@@ -31,6 +31,7 @@ add_library(wasmcart_libretro SHARED
     src/libretro.c
     ${WC_NATIVE}/src/cart_host.cpp
     ${WC_NATIVE}/src/gl_imports.cpp
+    ${WC_NATIVE}/src/gl_procs.c
     ${WC_NATIVE}/src/asset_loader.c
     ${WC_NATIVE}/deps/miniz.c
     ${WC_NATIVE}/deps/cJSON.c
@@ -47,48 +48,28 @@ target_include_directories(wasmcart_libretro PRIVATE
     ${LIBNODE_DIR}/include
 )
 
-# GLES3/EGL — system on Linux/Android, ANGLE on macOS/Windows
-set(ANGLE_DIR "" CACHE PATH "Path to ANGLE (lib/ + include/)")
-if(ANGLE_DIR AND EXISTS "${ANGLE_DIR}/include")
-    target_include_directories(wasmcart_libretro PRIVATE ${ANGLE_DIR}/include)
-    if(APPLE)
-        target_link_libraries(wasmcart_libretro PRIVATE
-            ${ANGLE_DIR}/lib/libEGL.dylib
-            ${ANGLE_DIR}/lib/libGLESv2.dylib)
-    elseif(WIN32)
-        target_link_libraries(wasmcart_libretro PRIVATE
-            ${ANGLE_DIR}/lib/libEGL.lib
-            ${ANGLE_DIR}/lib/libGLESv2.lib)
-    endif()
-endif()
+# GL: the core uses RetroArch's GL context. It needs the GLES3 *headers* (for the
+# GL types + PFN typedefs) but links NO GL library — every GL entry point is
+# loaded at runtime from the frontend's get_proc_address (see gl_procs.{h,c} +
+# wc_host_set_gl_loader in src/libretro.c). Headers are vendored (Khronos, MIT) so
+# the build is identical and self-contained on every platform: no system mesa-dev,
+# no ANGLE, no EGL/GLESv2 link, no sidecar dylibs. Single-file core everywhere.
+target_include_directories(wasmcart_libretro PRIVATE ${WC_NATIVE}/vendor/gl)
 
-# libnode
+# libnode (+ platform system libs). NOTE: no GLESv2/EGL here — the GL layer loads
+# GL from the frontend, so the core links no GL library on any platform.
 if(WIN32)
     target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.lib winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt)
 elseif(ANDROID)
     # cpu-features: V8 calls android_getCpuFeatures
     add_library(cpufeatures STATIC ${ANDROID_NDK}/sources/android/cpufeatures/cpu-features.c)
     target_include_directories(cpufeatures PUBLIC ${ANDROID_NDK}/sources/android/cpufeatures)
-    target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a dl m log GLESv3 EGL android cpufeatures)
+    target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a dl m log android cpufeatures)
 elseif(APPLE)
     target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a pthread dl m
         "-framework CoreFoundation" "-framework Security" "-framework SystemConfiguration")
 else()
     target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a pthread dl m)
-endif()
-
-# GL (provided by RetroArch's context, but we need headers + link for FBO ops)
-if(NOT ANDROID)
-    find_library(GLESV2_LIB GLESv2)
-    find_library(EGL_LIB EGL)
-    if(GLESV2_LIB)
-        target_link_libraries(wasmcart_libretro PRIVATE ${GLESV2_LIB})
-    endif()
-    if(EGL_LIB)
-        target_link_libraries(wasmcart_libretro PRIVATE ${EGL_LIB})
-    endif()
-else()
-    target_link_libraries(wasmcart_libretro PRIVATE GLESv2 EGL log)
 endif()
 
 if(NOT MSVC)

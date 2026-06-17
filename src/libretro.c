@@ -11,6 +11,9 @@
 #include <math.h>
 #include <time.h>
 #include <GLES3/gl3.h>
+// Redirect this file's glXxx() (cart GL-state save/restore) to pointers loaded
+// from RetroArch's get_proc_address — the core links no GL library of its own.
+#include "gl_procs.h"
 #include <wc_log.h>
 
 // ─── Libretro callbacks ─────────────────────────────────────────────────────
@@ -246,6 +249,13 @@ static void on_context_reset(void) {
 
     // Now GL is available — finish deferred init
     if (host) {
+        // RetroArch is the host: give wasmcart its GL via the frontend's
+        // get_proc_address (the common libretro GL context — GLES3 on Android /
+        // handhelds, whatever the desktop frontend provides). The shared GL layer
+        // loads its entry points from this, so the core links NO GL library of
+        // its own (no ANGLE, single self-contained file).
+        wc_host_set_gl_loader(host, (wc_gl_get_proc_fn)hw_render.get_proc_address);
+
         // Create redirect FBO with depth+stencil BEFORE cart init.
         // Three.js needs depth testing, Ganesh needs stencil.
         // RetroArch's hw_render FBO may not have these attachments.
@@ -276,6 +286,9 @@ static void on_context_reset(void) {
         av.timing.sample_rate = ci2->audio_sample_rate ? (double)ci2->audio_sample_rate : 48000.0;
         environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
         wc_log("wasmcart: SET_SYSTEM_AV_INFO %ux%u\n", redir_w, redir_h);
+
+        // Save cart's initial GL state so restore works on first frame
+        save_cart_gl_state();
     }
 }
 
