@@ -21,7 +21,7 @@ cd wasmcart-libretro
 
 # 2. Download pre-built libnode
 mkdir -p deps/libnode
-curl -sL https://github.com/wasmcart/build-libnode/releases/download/v24.14.1/libnode-linux-x86_64.tar.gz | tar xz -C deps/libnode
+curl -sL https://github.com/wasmcart/build-libnode/releases/download/v26.3.0-jsg9/libnode-linux-x86_64.tar.gz | tar xz -C deps/libnode
 
 # 3. Build the core
 mkdir build && cd build
@@ -36,7 +36,10 @@ cp ../wasmcart_libretro.info $CORES/
 
 Pre-built libnode downloads for all platforms at [wasmcart/build-libnode releases](https://github.com/wasmcart/build-libnode/releases).
 
-macOS and Windows also need ANGLE for GLES3 headers + libs. Set `-DANGLE_DIR=path/to/angle` in cmake.
+The core links **no GL library** — every GL entry point is loaded at runtime from
+RetroArch's `get_proc_address` (the GLES3 *headers* are vendored in
+`deps/wasmcart-native/vendor/gl`). No ANGLE, no `-DANGLE_DIR`, no sidecar libs: the
+shipped core is a single self-contained `wasmcart_libretro.<ext>` on every platform.
 
 ## Usage
 
@@ -83,9 +86,9 @@ RetroArch provides a Core 3.3 GL context (via GLX). ES 3.0 shaders (`#version 30
 |----------|--------|-------|
 | Linux x86_64 | Working | |
 | Linux aarch64 | Working | |
-| macOS x86_64 | Working | Requires ANGLE |
-| macOS aarch64 | Working | Requires ANGLE |
-| Windows x86_64 | Working | Requires ANGLE |
+| macOS x86_64 | Working | |
+| macOS aarch64 | Working | |
+| Windows x86_64 | Working | |
 | Android aarch64 | Working | NDK r27c, API 33 |
 
 ## Pre-built binaries
