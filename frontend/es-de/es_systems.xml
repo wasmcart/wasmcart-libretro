@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<!--
+wasmcart system for ES-DE / RetroDeck. Copy into custom_systems/ (see README.md).
+The bundled %CORE_RETROARCH% cores dir is read-only in the RetroDeck flatpak, so
+the command uses an absolute -L path to the core in a writable host dir.
+-->
+<systemList>
+  <system>
+    <name>wasmcart</name>
+    <fullname>wasmcart</fullname>
+    <path>%ROMPATH%/wasmcart</path>
+    <extension>.wasc .WASC</extension>
+    <command label="wasmcart (libretro)">%EMULATOR_RETROARCH% -L /home/deck/retrodeck/storage/wasmcart-cores/wasmcart_libretro.so %ROM%</command>
+    <platform>pc</platform>
+    <theme>wasmcart</theme>
+  </system>
+</systemList>
