@@ -29,6 +29,7 @@ endif()
 
 add_library(wasmcart_libretro SHARED
     src/libretro.c
+    src/glibc_compat.c
     ${WC_NATIVE}/src/cart_host.cpp
     ${WC_NATIVE}/src/gl_imports.cpp
     ${WC_NATIVE}/src/gl_procs.c
@@ -70,6 +71,10 @@ elseif(APPLE)
         "-framework CoreFoundation" "-framework Security" "-framework SystemConfiguration")
 else()
     target_link_libraries(wasmcart_libretro PRIVATE ${LIBNODE_DIR}/libnode.a pthread dl m)
+    # Redirect sqrtf@GLIBC_2.43 (pulled in when linking on a 2.43 host) to the old
+    # @GLIBC_2.2.5 version so the .so loads on older runtimes (e.g. the RetroDECK
+    # flatpak's glibc). See src/glibc_compat.c.
+    target_link_options(wasmcart_libretro PRIVATE -Wl,--wrap=sqrtf)
 endif()
 
 if(NOT MSVC)
