@@ -35,6 +35,16 @@ static uint32_t cart_w = 0, cart_h = 0;
 static uint32_t frame_count = 0;
 static double time_ms = 0;
 
+// Per-frame delta the frontend reports via RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK
+// (called right before each retro_run). 0 until the first callback (then we fall
+// back to a fixed 1000/60 step). Carts read wc_time.delta_ms for motion (e.g.
+// racer's physics/AI/camera/audio all scale by dt), so a blind fixed step makes a
+// genuine frontend stall produce SLOW-MOTION instead of a dropped frame. The
+// frontend substitutes the reference value during fast-forward / slow-motion /
+// frame-stepping / pause, so those stay correct without the core detecting them.
+static double frame_time_ms = 0.0;
+static void frame_time_cb(retro_usec_t usec) { frame_time_ms = (double)usec / 1000.0; }
+
 // Audio conversion buffer (F32 → S16)
 static int16_t* audio_conv_buf = NULL;
 static uint32_t audio_conv_cap = 0;
@@ -333,6 +343,15 @@ bool retro_load_game(const struct retro_game_info* game) {
     enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_XRGB8888;
     environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt);
 
+    // Ask the frontend to report per-frame elapsed time so carts get a real dt
+    // (idiomatic libretro timing). reference = ideal µs/frame; the frontend
+    // substitutes it during FF/slow-mo/pause. Optional — if the frontend declines,
+    // delta falls back to a fixed 1000/60 below (exact current behavior).
+    struct retro_frame_time_callback frame_time = {
+        frame_time_cb, (retro_usec_t)(1000000.0 / 60.0)
+    };
+    environ_cb(RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK, &frame_time);
+
     // Load the .wasc
     // For GL carts, defer _initialize/wc_init until GL context is ready
     wc_host_options_t opts = {0};
@@ -462,8 +481,16 @@ void retro_run(void) {
     }
     wc_host_set_pads(host, pads);
 
-    // 3. Set time — fixed 60fps delta (RetroArch controls frame rate + audio sync)
-    double delta_ms = 1000.0 / 60.0;
+    // 3. Set time — use the frontend-reported per-frame delta when available so a
+    // slow retro_run yields a correct large dt (carts drop a frame) instead of
+    // slow-motion; the frontend feeds the reference during FF/slow-mo/pause so
+    // those stay correct. Clamp to 4 frames so a long hitch/resume can't teleport
+    // a dt-correct cart. Falls back to a fixed 1000/60 if the frontend never
+    // registers the callback (frame_time_ms == 0) — exact prior behavior.
+    const double FIXED_STEP = 1000.0 / 60.0;
+    double delta_ms = (frame_time_ms > 0.0)
+        ? (frame_time_ms < FIXED_STEP * 4.0 ? frame_time_ms : FIXED_STEP * 4.0)
+        : FIXED_STEP;
     time_ms += delta_ms;
     wc_host_set_time(host, time_ms, delta_ms, frame_count);
     frame_count++;
