@@ -1,16 +1,20 @@
 # wasmcart-libretro
 
-RetroArch libretro core for wasmcart. Runs `.wasc` game carts in RetroArch with full gamepad, audio, save state, shader, and netplay support. Powered by V8 via libnode for instant WASM startup.
+[RetroArch](https://www.retroarch.com) [libretro](https://www.libretro.com) core for
+[wasmcart](https://github.com/wasmcart/wasmcart). Runs `.wasc` game carts in RetroArch
+with full gamepad, audio, save state, shader, and netplay support. Powered by
+[V8](https://v8.dev) via [libnode](https://github.com/wasmcart/build-libnode) for
+instant WASM startup.
 
 ## Working Carts
 
 | Cart | Type | Engine |
 |------|------|--------|
-| Snake | 2D framebuffer | C/Emscripten |
-| Three.js Demo | GL (WebGL2) | Three.js direct |
-| Warlords | GL (Godot 4.4) | Godot GLES3 Compatibility |
+| Snake | 2D framebuffer | C/[Emscripten](https://emscripten.org) |
+| Three.js Demo | GL (WebGL2) | [Three.js](https://threejs.org) direct |
+| Warlords | GL ([Godot](https://godotengine.org) 4.4) | Godot GLES3 Compatibility |
 | RoboBlast TPS | GL (Godot 4.4) | Godot GLES3, 3D |
-| OpenArena | GL (ioquake3) | renderergl2 GLES |
+| OpenArena | GL ([ioquake3](https://github.com/ioquake/ioq3)) | renderergl2 GLES |
 
 ## Build
 
@@ -72,7 +76,8 @@ Shared code is pulled from [wasmcart-native](https://github.com/wasmcart/wasmcar
 
 ## GL Surface
 
-The wasmcart GL surface is **WebGL2 / OpenGL ES 3.0** — the same on all hosts. The host reports `GL_VERSION = "OpenGL ES 3.0 wasmcart"` regardless of the actual driver. Real driver extensions pass through for carts that need them (e.g., Godot texture format detection).
+The [wasmcart GL surface](https://github.com/wasmcart/wasmcart/blob/main/docs/gl-surface.md)
+is **WebGL2 / OpenGL ES 3.0** — the same on all hosts. The host reports `GL_VERSION = "OpenGL ES 3.0 wasmcart"` regardless of the actual driver. Real driver extensions pass through for carts that need them (e.g., Godot texture format detection).
 
 RetroArch provides a Core 3.3 GL context (via GLX). ES 3.0 shaders (`#version 300 es`) work on Core 3.3 via `GL_ARB_ES3_compatibility`. The FBO redirect intercepts `glBindFramebuffer(0)` → capture FBO with depth+stencil, then blits to RetroArch's hw_render FBO after each frame.
 
@@ -93,7 +98,12 @@ RetroArch provides a Core 3.3 GL context (via GLX). ES 3.0 shaders (`#version 30
 
 ## Pre-built binaries
 
-Download from [Releases](https://github.com/wasmcart/wasmcart-libretro/releases).
+Download from [Releases](https://github.com/wasmcart/wasmcart-libretro/releases) —
+Linux (x86_64/aarch64), macOS (x86_64/aarch64), Windows x86_64 and Android aarch64.
+
+The bundled ZIP reader is [miniz](https://github.com/richgel999/miniz) and manifest
+parsing uses [cJSON](https://github.com/DaveGamble/cJSON); both are vendored under
+`deps/`.
 
 ## License
 
