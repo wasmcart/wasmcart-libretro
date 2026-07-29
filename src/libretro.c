@@ -203,6 +203,64 @@ static void check_options(void) {
     }
 }
 
+// ─── Rumble (ABI v3) ───────────────────────────────────────────────────────
+//
+// The cart drives rumble, so wasmcart-native asks US to actuate it. libretro
+// gives us set_rumble_state(port, effect, strength) with NO duration, so the
+// duration the cart asked for has to be run down on our own frame timer and
+// the motors stopped explicitly -- otherwise a one-shot effect buzzes forever.
+//
+// The two models line up cleanly: the ABI's low/high are the strong/weak
+// motors, which is exactly RETRO_RUMBLE_STRONG / RETRO_RUMBLE_WEAK.
+static struct retro_rumble_interface rumble_iface;
+static bool rumble_available = false;
+
+// Frames remaining per pad, decremented in retro_run at the fixed 60fps step.
+static int rumble_frames_left[WC_MAX_PADS];
+
+static int lr_has_rumble(void* user, uint32_t pad_id) {
+    (void)user;
+    if (!rumble_available || pad_id >= WC_MAX_PADS) return 0;
+    // Per-DEVICE, not per-platform. libretro has no "can this pad rumble"
+    // query, so probe by setting zero strength: a port with no rumble returns
+    // false and one with rumble returns true, without the player feeling it.
+    return rumble_iface.set_rumble_state(pad_id, RETRO_RUMBLE_STRONG, 0) ? 1 : 0;
+}
+
+static void lr_rumble(void* user, uint32_t pad_id, float low, float high,
+                      uint32_t duration_ms) {
+    (void)user;
+    if (!rumble_available || pad_id >= WC_MAX_PADS) return;
+    // low/high arrive already clamped to 0..1 and duration already capped at
+    // WC_RUMBLE_MAX_MS -- wasmcart-native does that so every backend agrees.
+    // 0xFFFF, not 0xFFFE: libretro's strength is a full uint16 range.
+    uint16_t strong = (uint16_t)(low  * 65535.0f + 0.5f);
+    uint16_t weak   = (uint16_t)(high * 65535.0f + 0.5f);
+    rumble_iface.set_rumble_state(pad_id, RETRO_RUMBLE_STRONG, strong);
+    rumble_iface.set_rumble_state(pad_id, RETRO_RUMBLE_WEAK,   weak);
+    // Round UP so a sub-frame effect still lasts one visible frame rather than
+    // being cancelled before the player feels anything.
+    rumble_frames_left[pad_id] = (int)((duration_ms * 60 + 999) / 1000);
+    if (rumble_frames_left[pad_id] < 1) rumble_frames_left[pad_id] = 1;
+}
+
+static void lr_rumble_stop(void* user, uint32_t pad_id) {
+    (void)user;
+    if (!rumble_available || pad_id >= WC_MAX_PADS) return;
+    rumble_iface.set_rumble_state(pad_id, RETRO_RUMBLE_STRONG, 0);
+    rumble_iface.set_rumble_state(pad_id, RETRO_RUMBLE_WEAK,   0);
+    rumble_frames_left[pad_id] = 0;
+}
+
+// Run the duration timers down; called once per frame from retro_run.
+static void rumble_tick(void) {
+    if (!rumble_available) return;
+    for (uint32_t i = 0; i < WC_MAX_PADS; i++) {
+        if (rumble_frames_left[i] > 0 && --rumble_frames_left[i] == 0)
+            lr_rumble_stop(NULL, i);
+    }
+}
+
 void retro_set_environment(retro_environment_t cb) {
     environ_cb = cb;
 
@@ -312,9 +370,28 @@ void retro_init(void) {
     host = wc_host_create();
     if (!host && log_cb)
         log_cb(RETRO_LOG_ERROR, "wasmcart: failed to create host\n");
+
+    // Rumble is optional: a frontend without it simply says no, and the cart's
+    // wc_pad_has_rumble then reports 0 rather than the cart failing to load.
+    rumble_available = environ_cb &&
+        environ_cb(RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE, &rumble_iface);
+    memset(rumble_frames_left, 0, sizeof(rumble_frames_left));
+    if (host && rumble_available) {
+        wc_rumble_backend_t backend = {
+            .has_rumble = lr_has_rumble,
+            .rumble     = lr_rumble,
+            .stop       = lr_rumble_stop,
+            .user       = NULL,
+        };
+        wc_host_set_rumble_backend(host, &backend);
+    }
+    if (log_cb)
+        log_cb(RETRO_LOG_INFO, "wasmcart: rumble %s\n",
+               rumble_available ? "available" : "not supported by frontend");
 }
 
 void retro_deinit(void) {
+    for (uint32_t i = 0; i < WC_MAX_PADS; i++) lr_rumble_stop(NULL, i);
     wc_host_exit_v8();
     wc_host_destroy(host);
     host = NULL;
@@ -443,6 +520,10 @@ void retro_run(void) {
             cart_h = ci->height;
         }
     }
+
+    // Run rumble durations down before polling, so an effect started last
+    // frame stops on time even if the cart does not call rumble again.
+    rumble_tick();
 
     // 1. Poll input
     input_poll_cb();
