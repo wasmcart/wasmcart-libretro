@@ -115,6 +115,3 @@ core **saves the cart's GL state** (`save_cart_gl_state` in `libretro.c`) and
 restores it each frame so neither corrupts the other's bindings. These reads are GL
 calls — they go through the `get_proc_address`-loaded pointers like everything else
 (don't reintroduce direct `glXxx` here).
-EOF
-echo "created wasmcart-libretro/doc/dev_notes.md ($(wc -l < /home/monteslu/code/cliemu/wasmcart-libretro/doc/dev_notes.md) lines)"
-ls -la /home/monteslu/code/cliemu/wasmcart-libretro/doc/dev_notes.md
