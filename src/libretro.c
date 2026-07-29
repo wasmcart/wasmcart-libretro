@@ -282,7 +282,7 @@ void retro_set_environment(retro_environment_t cb) {
 void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "wasmcart";
-    info->library_version = "0.2.0";
+    info->library_version = "0.2.1";
     info->valid_extensions = "wasc|wasm";
     info->need_fullpath = true;   // we read the file ourselves (ZIP)
     info->block_extract = true;   // don't extract, we handle ZIP
