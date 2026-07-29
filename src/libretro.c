@@ -337,9 +337,36 @@ static void on_context_reset(void) {
         cart_w = ci->width;
         cart_h = ci->height;
 
-        // Use cart's actual resolution (may differ from pref if cart overrides)
-        uint32_t redir_w = cart_w > pref_width ? cart_w : pref_width;
-        uint32_t redir_h = cart_h > pref_height ? cart_h : pref_height;
+        // Sizing differs by cart TYPE, and taking max() for both was wrong.
+        //
+        // A GL cart renders into whatever drawable it is handed, so it should
+        // get the larger of its own request and the frontend preference --
+        // undersizing crops it.
+        //
+        // A 2D cart is the opposite: it draws into a fixed cart_w x cart_h
+        // framebuffer that we upload as a texture. Sizing the target to the
+        // preference does NOT scale it up; it leaves the cart's pixels in the
+        // bottom-left corner of a mostly-empty buffer. The 64x64 rumble
+        // fixture landed in 0.1% of a 1920x1080 target -- a black screen with a
+        // speck in the corner. Give a 2D cart exactly its own size and let
+        // RetroArch scale it to the window, which is what frontends are for.
+        // The target must match what the cart ACTUALLY renders, for both cart
+        // types. Taking max() with the frontend preference was wrong: it does
+        // not scale the cart up, it leaves the cart's output in the bottom-left
+        // corner of a larger, mostly-empty frame.
+        //
+        // Measured: hello_canvas declares 800x600 and its Ganesh blit really is
+        // 800x600, but the FBO was sized 1920x1080 -- so 75% of the screen was
+        // empty and the image sat in the corner. The 64x64 rumble fixture was
+        // the same bug at an extreme, showing as an all-black screen.
+        //
+        // pref_width/height still reach the cart through wc_host_options_t as a
+        // PREFERENCE before init; a cart free to honour it comes back already
+        // resized, and cart_w/h then equals the preference anyway. What a cart
+        // reports after init is the authority, so use it verbatim and let
+        // RetroArch scale to the window -- that is what a frontend is for.
+        uint32_t redir_w = cart_w;
+        uint32_t redir_h = cart_h;
         wc_gl_setup_redirect(redir_w, redir_h);
 
         // Update full AV info — SET_GEOMETRY alone won't resize RetroArch's FBO
@@ -607,8 +634,10 @@ void retro_run(void) {
         extern void wc_gl_get_blit_size(uint32_t* w, uint32_t* h);
         uint32_t blit_w = 0, blit_h = 0;
         wc_gl_get_blit_size(&blit_w, &blit_h);
-        if (!blit_w) blit_w = cart_w > pref_width ? cart_w : pref_width;
-        if (!blit_h) blit_h = cart_h > pref_height ? cart_h : pref_height;
+        // Same rule as the redirect sizing above: fall back to the cart's own
+        // resolution, never max() with the preference.
+        if (!blit_w) blit_w = cart_w;
+        if (!blit_h) blit_h = cart_h;
 
         if (wc_gl_has_redirect()) {
             extern void wc_gl_blit_to_fbo(uint32_t target_fbo, uint32_t cart_w, uint32_t cart_h, uint32_t dst_w, uint32_t dst_h, int flip_y);
