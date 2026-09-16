@@ -32,6 +32,10 @@ static bool uses_gl = false;
 static bool gl_context_ready = false;
 static bool first_frame = true;
 static uint32_t cart_w = 0, cart_h = 0;
+// Largest geometry we have told RetroArch about (sizes its HW render FBO).
+static uint32_t max_w = 0, max_h = 0;
+// on_context_reset learned the cart's real size; apply it on the next retro_run.
+static bool geometry_pending = false;
 static uint32_t frame_count = 0;
 static double time_ms = 0;
 
@@ -282,7 +286,7 @@ void retro_set_environment(retro_environment_t cb) {
 void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "wasmcart";
-    info->library_version = "0.4.0";
+    info->library_version = "0.4.1";
     info->valid_extensions = "wasc|wasm";
     info->need_fullpath = true;   // we read the file ourselves (ZIP)
     info->block_extract = true;   // don't extract, we handle ZIP
@@ -292,8 +296,14 @@ void retro_get_system_av_info(struct retro_system_av_info* info) {
     memset(info, 0, sizeof(*info));
     info->geometry.base_width = cart_w;
     info->geometry.base_height = cart_h;
-    info->geometry.max_width = pref_width;
-    info->geometry.max_height = pref_height;
+    // max_* sizes RetroArch's HW render FBO once, at video init. Declare the
+    // larger of the frontend preference and whatever the cart said before init
+    // so that on_context_reset can usually fix the real size with SET_GEOMETRY
+    // (no reinit) instead of SET_SYSTEM_AV_INFO (full video reinit).
+    max_w = cart_w > pref_width  ? cart_w : pref_width;
+    max_h = cart_h > pref_height ? cart_h : pref_height;
+    info->geometry.max_width = max_w;
+    info->geometry.max_height = max_h;
     info->geometry.aspect_ratio = (float)cart_w / (float)cart_h;
     info->timing.fps = 60.0;
 
@@ -369,18 +379,36 @@ static void on_context_reset(void) {
         uint32_t redir_h = cart_h;
         wc_gl_setup_redirect(redir_w, redir_h);
 
-        // Update full AV info — SET_GEOMETRY alone won't resize RetroArch's FBO
-        struct retro_system_av_info av = {0};
-        av.geometry.base_width = redir_w;
-        av.geometry.base_height = redir_h;
-        av.geometry.max_width = redir_w;
-        av.geometry.max_height = redir_h;
-        av.geometry.aspect_ratio = (float)redir_w / (float)redir_h;
-        av.timing.fps = 60.0;
-        const wc_cart_info_t* ci2 = wc_host_get_cart_info(host);
-        av.timing.sample_rate = ci2->audio_sample_rate ? (double)ci2->audio_sample_rate : 48000.0;
-        environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
-        wc_log("wasmcart: SET_SYSTEM_AV_INFO %ux%u\n", redir_w, redir_h);
+        // Tell RetroArch the cart's real size. SET_SYSTEM_AV_INFO forces a full
+        // video reinit, and that tears down the GL context the cart just built
+        // its shaders and textures in (context_destroy, then a fresh context the
+        // cart cannot rebuild into). On Batocera/Pi5 (Mesa V3D, Wayland) every
+        // GL cart then drew with GL_INVALID_OPERATION or segfaulted a frame in.
+        // RetroArch's HW FBO is already sized from max_w/max_h, so when the
+        // cart fits, SET_GEOMETRY -- which never reinits -- is all that is
+        // needed. It is applied from retro_run rather than here because we are
+        // still inside RetroArch's video init. Only a cart that outgrows the
+        // declared max takes the reinit path; cache_context (set at load) asks
+        // RetroArch to keep the context alive even then.
+        if (redir_w <= max_w && redir_h <= max_h) {
+            geometry_pending = true;
+            wc_log("wasmcart: geometry %ux%u (within max %ux%u, SET_GEOMETRY on next frame)\n",
+                   redir_w, redir_h, max_w, max_h);
+        } else {
+            struct retro_system_av_info av = {0};
+            av.geometry.base_width = redir_w;
+            av.geometry.base_height = redir_h;
+            av.geometry.max_width = redir_w;
+            av.geometry.max_height = redir_h;
+            av.geometry.aspect_ratio = (float)redir_w / (float)redir_h;
+            av.timing.fps = 60.0;
+            const wc_cart_info_t* ci2 = wc_host_get_cart_info(host);
+            av.timing.sample_rate = ci2->audio_sample_rate ? (double)ci2->audio_sample_rate : 48000.0;
+            max_w = redir_w;
+            max_h = redir_h;
+            environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
+            wc_log("wasmcart: SET_SYSTEM_AV_INFO %ux%u (exceeded declared max)\n", redir_w, redir_h);
+        }
 
         // Save cart's initial GL state so restore works on first frame
         save_cart_gl_state();
@@ -492,6 +520,9 @@ bool retro_load_game(const struct retro_game_info* game) {
     hw_render.bottom_left_origin = true;
     hw_render.depth = true;
     hw_render.stencil = true;
+    // Keep the GL context across video reinits (fullscreen toggle, av_info
+    // change): the cart's GL objects live in it and cannot be recreated.
+    hw_render.cache_context = true;
 
     bool got_context = false;
     hw_render.context_type = RETRO_HW_CONTEXT_OPENGLES3;
@@ -602,6 +633,19 @@ void retro_run(void) {
     time_ms += delta_ms;
     wc_host_set_time(host, time_ms, delta_ms, frame_count);
     frame_count++;
+
+    // Deferred from on_context_reset: geometry change without a video reinit.
+    if (geometry_pending) {
+        geometry_pending = false;
+        struct retro_game_geometry geom = {0};
+        geom.base_width = cart_w;
+        geom.base_height = cart_h;
+        geom.max_width = max_w;
+        geom.max_height = max_h;
+        geom.aspect_ratio = (float)cart_w / (float)cart_h;
+        environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
+        wc_log("wasmcart: SET_GEOMETRY %ux%u\n", cart_w, cart_h);
+    }
 
     // 4. Run one frame — restore cart's GL state before rendering
     if (gl_context_ready) {
