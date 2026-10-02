@@ -12,6 +12,13 @@
 // __wrap_sqrtf below, which forwards to the old @GLIBC_2.2.5 implementation (still
 // present in every modern libm). Behaviour is identical for our uses; we only
 // forgo 2.43's last-ulp rounding guarantee. Linux/glibc only.
+// __GLIBC__ comes from <features.h>; without a header it is never defined, the
+// #if below is silently false, this file compiles to NOTHING, and --wrap leaves
+// the .so with an undefined __wrap_sqrtf (which shipped in v0.5.0).
+#ifdef __linux__
+#include <features.h>
+#endif
+
 #if defined(__linux__) && defined(__GLIBC__)
 
 // Bind these names to the old, widely-available symbol versions.
