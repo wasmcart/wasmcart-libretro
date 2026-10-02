@@ -21,8 +21,17 @@
 
 #if defined(__linux__) && defined(__GLIBC__)
 
-// Bind these names to the old, widely-available symbol versions.
+// Bind to each architecture's BASELINE glibc version: x86_64 starts at 2.2.5,
+// aarch64 at 2.17 (naming 2.2.5 there fails the link with "no symbol version
+// section"). Anything else forwards to the default sqrtf via --wrap's
+// __real_ alias, so a new architecture links instead of breaking.
+#if defined(__x86_64__)
 __asm__(".symver __old_sqrtf,sqrtf@GLIBC_2.2.5");
+#elif defined(__aarch64__)
+__asm__(".symver __old_sqrtf,sqrtf@GLIBC_2.17");
+#else
+#define __old_sqrtf __real_sqrtf
+#endif
 
 extern float __old_sqrtf(float);
 
