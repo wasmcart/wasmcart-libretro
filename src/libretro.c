@@ -608,17 +608,101 @@ void retro_run(void) {
         if (input_state_cb(p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT)) buttons |= WC_BUTTON_RIGHT;
         if (input_state_cb(p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3))    buttons |= WC_BUTTON_L3;
         if (input_state_cb(p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3))    buttons |= WC_BUTTON_R3;
+        // WC_BUTTON_GUIDE, MISC1, PADDLE1-4 and TOUCHPAD (ABI v4) are NOT set
+        // here, deliberately: the RetroPad abstraction has no ids for them.
+        // Its button set stops at a SNES-style pad plus L2/R2/L3/R3, so there
+        // is nothing to read -- polling for them would be dead code that
+        // always returns 0. A cart wanting paddles gets them from a host that
+        // can actually see them, and reads 0 here, which is the same as a pad
+        // that does not have any.
 
         pads[p].buttons = buttons;
         pads[p].left_x = input_state_cb(p, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X);
         pads[p].left_y = input_state_cb(p, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y);
         pads[p].right_x = input_state_cb(p, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X);
         pads[p].right_y = input_state_cb(p, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y);
-        pads[p].left_trigger = (uint8_t)(input_state_cb(p, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_BUTTON, RETRO_DEVICE_ID_JOYPAD_L2) >> 8);
-        pads[p].right_trigger = (uint8_t)(input_state_cb(p, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_BUTTON, RETRO_DEVICE_ID_JOYPAD_R2) >> 8);
+        // Triggers pass straight through as of ABI v4: libretro reports
+        // analog buttons as 0..0x7fff (libretro.h: "Analog buttons are
+        // reported in the range of [0, 0x7fff]") and the pad struct now
+        // stores int16 0..32767, which is the same range.
+        //
+        // This used to narrow into a uint8 with `>> 8`, which divides by 256
+        // when the range only spans 15 bits: a fully pressed trigger read as
+        // 127 of 255, so it never looked more than half pressed and a cart
+        // gating on a high threshold never fired. There is no conversion left
+        // to get wrong.
+        pads[p].left_trigger  = input_state_cb(p, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_BUTTON, RETRO_DEVICE_ID_JOYPAD_L2);
+        pads[p].right_trigger = input_state_cb(p, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_BUTTON, RETRO_DEVICE_ID_JOYPAD_R2);
         pads[p].connected = (p == 0) ? 1 : 0; // Port 0 always connected
     }
     wc_host_set_pads(host, pads);
+
+    /* ── Pointer and mouse ────────────────────────────────────────────────
+     *
+     * TWO libretro DEVICES, because neither covers the wasmcart pointer ABI
+     * on its own:
+     *
+     *   RETRO_DEVICE_POINTER carries absolute position and works for touch.
+     *     Its coordinates are [-0x7fff, 0x7fff] across the GAME IMAGE, so
+     *     RetroArch has already undone its own letterboxing and scaling for
+     *     us: no window arithmetic here, which is the part every other host
+     *     has to get right by hand. _PRESSED is 1 only INSIDE the image,
+     *     which is exactly the ABI's `active`.
+     *
+     *   RETRO_DEVICE_MOUSE carries the buttons POINTER has no room for
+     *     (middle, right) and the wheel. Its X/Y are RELATIVE deltas, so it
+     *     is deliberately not used for position.
+     *
+     * A frontend with neither configured returns 0 for all of it, which
+     * leaves the pointer inactive -- the same shape as a device with no
+     * mouse, and what a cart already has to handle.
+     */
+    {
+        const int16_t px = input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
+        const int16_t py = input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
+        const bool    pressed = input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_PRESSED) != 0;
+
+        const bool m_left   = input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_LEFT)   != 0;
+        const bool m_right  = input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_RIGHT)  != 0;
+        const bool m_middle = input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_MIDDLE) != 0;
+
+        // Bit 0 primary, bit 1 secondary, bit 2 middle (SPEC.md). POINTER's
+        // single _PRESSED folds into the primary bit: on a desktop the
+        // frontend maps it to the left button, and on a touchscreen a press
+        // IS the primary button.
+        uint8_t buttons = 0;
+        if (pressed || m_left) buttons |= 0x01;
+        if (m_right)           buttons |= 0x02;
+        if (m_middle)          buttons |= 0x04;
+
+        // POINTER is [-0x7fff, 0x7fff] across the game image; the cart wants
+        // pixels in its own resolution. Clamped to the last row and column so
+        // the far edge cannot land one pixel outside the framebuffer.
+        uint32_t cw = 0, ch = 0;
+        (void)wc_host_get_framebuffer(host, &cw, &ch);
+        if (cw == 0) cw = 1;
+        if (ch == 0) ch = 1;
+        long cx = ((long)px + 0x7fff) * (long)cw / 0xfffe;
+        long cy = ((long)py + 0x7fff) * (long)ch / 0xfffe;
+        if (cx < 0) cx = 0; else if (cx >= (long)cw) cx = (long)cw - 1;
+        if (cy < 0) cy = 0; else if (cy >= (long)ch) cy = (long)ch - 1;
+
+        // Active when the frontend says the pointer is on the image, or when
+        // any mouse button is down. A pointer that is merely hovering with no
+        // press still reports a position, which is what a desktop cart wants.
+        const uint8_t active = (pressed || buttons || px != 0 || py != 0) ? 1 : 0;
+        wc_host_set_pointer(host, 0, (int16_t)cx, (int16_t)cy, buttons, active);
+
+        // Wheel. libretro exposes it as four one-shot directional flags
+        // rather than a delta, so each set flag is one notch. The host
+        // accumulates and zeroes per frame.
+        int32_t wdx = 0, wdy = 0;
+        if (input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_WHEELUP))         wdy += WC_WHEEL_DELTA;
+        if (input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_WHEELDOWN))       wdy -= WC_WHEEL_DELTA;
+        if (input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_HORIZ_WHEELUP))   wdx += WC_WHEEL_DELTA;
+        if (input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_HORIZ_WHEELDOWN)) wdx -= WC_WHEEL_DELTA;
+        if (wdx || wdy) wc_host_add_wheel(host, wdx, wdy);
+    }
 
     // 3. Set time — use the frontend-reported per-frame delta when available so a
     // slow retro_run yields a correct large dt (carts drop a frame) instead of
