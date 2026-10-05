@@ -731,6 +731,39 @@ void retro_run(void) {
         wc_log("wasmcart: SET_GEOMETRY %ux%u\n", cart_w, cart_h);
     }
 
+    // DIRECT PRESENT: a GL cart draws straight into RetroArch's hw_render
+    // framebuffer instead of the redirect FBO, so the per-frame copy into it
+    // is skipped (RetroArch's own present pass remains). Only when that
+    // framebuffer has the depth and stencil a 3D cart needs (we ask for both,
+    // a driver may still not give them); WASMCART_NO_DIRECT=1 keeps the old
+    // path. The target is refreshed every frame: the frontend may change it.
+    static int direct_state = -1; /* -1 undecided, 0 redirect, 1 direct */
+    if (gl_context_ready && uses_gl && hw_render.get_current_framebuffer) {
+        extern void wc_gl_set_direct_target(uint32_t fbo);
+        extern void wc_gl_set_direct(int on);
+        uint32_t ra = (uint32_t)hw_render.get_current_framebuffer();
+        if (direct_state < 0) {
+            /* attachment sizes (GL_DEPTH_BITS is not valid in a core profile) */
+            GLint depth = 0, stencil = 0, type = GL_NONE;
+            glBindFramebuffer(GL_FRAMEBUFFER, ra);
+            glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
+            if (type != GL_NONE) glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE, &depth);
+            type = GL_NONE;
+            glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
+            if (type != GL_NONE) glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE, &stencil);
+            while (glGetError() != GL_NO_ERROR) { }
+            const char* off = getenv("WASMCART_NO_DIRECT");
+            direct_state = depth > 0 && stencil > 0 && !(off && *off && *off != '0');
+            wc_log("wasmcart: %s (frontend FBO depth %d, stencil %d)\n",
+                   direct_state ? "direct present into RetroArch's FBO" : "presenting through the redirect FBO",
+                   depth, stencil);
+        }
+        if (direct_state == 1) {
+            wc_gl_set_direct_target(ra);
+            wc_gl_set_direct(1);
+        }
+    }
+
     // 4. Run one frame — restore cart's GL state before rendering
     if (gl_context_ready) {
         restore_cart_gl_state();
@@ -756,6 +789,33 @@ void retro_run(void) {
                 extern void wc_gl_upload_framebuffer(const uint8_t* pixels, uint32_t w, uint32_t h);
                 wc_gl_upload_framebuffer(fb, fb_w, fb_h);
             }
+        }
+
+        /* WASMCART_SHOT=<frame>:<file.ppm>: save that frame as the cart drew
+         * it (direct target or redirect), for tests */
+        {
+            static long shot_n = -2, frames_run = 0;
+            static char shot_path[512];
+            if (shot_n == -2) {
+                const char* e = getenv("WASMCART_SHOT");
+                const char* colon = e ? strchr(e, ':') : NULL;
+                shot_n = colon ? atol(e) : -1;
+                if (colon) snprintf(shot_path, sizeof shot_path, "%s", colon + 1);
+            }
+            if (uses_gl && frames_run == shot_n) {
+                extern int wc_gl_read_frame(uint8_t* out, uint32_t w, uint32_t h);
+                uint8_t* px = (uint8_t*)malloc((size_t)cart_w * cart_h * 4);
+                FILE* f = px && wc_gl_read_frame(px, cart_w, cart_h) ? fopen(shot_path, "wb") : NULL;
+                if (f) {
+                    fprintf(f, "P6\n%u %u\n255\n", cart_w, cart_h);
+                    for (uint32_t y = 0; y < cart_h; y++)
+                        for (uint32_t x = 0; x < cart_w; x++) fwrite(px + ((size_t)(cart_h - 1 - y) * cart_w + x) * 4, 1, 3, f);
+                    fclose(f);
+                    wc_log("wasmcart: frame %ld -> %s\n", shot_n, shot_path);
+                }
+                free(px);
+            }
+            frames_run++;
         }
 
         extern int wc_gl_has_redirect(void);
