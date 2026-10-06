@@ -81,6 +81,20 @@ is **WebGL2 / OpenGL ES 3.0** — the same on all hosts. The host reports `GL_VE
 
 RetroArch provides a Core 3.3 GL context (via GLX). ES 3.0 shaders (`#version 300 es`) work on Core 3.3 via `GL_ARB_ES3_compatibility`. The FBO redirect intercepts `glBindFramebuffer(0)` → capture FBO with depth+stencil, then blits to RetroArch's hw_render FBO after each frame.
 
+## WebGPU carts
+
+wasmcart has an optional WebGPU tier ([docs/webgpu.md](https://github.com/wasmcart/wasmcart/blob/main/docs/webgpu.md)).
+This core does not run it yet: libretro has no WebGPU hardware context, and
+Dawn cannot adopt RetroArch's GL or Vulkan device. So:
+
+- A WebGPU-only cart is refused at load, and RetroArch shows the reason
+  (`this cart is a WebGPU cart, but this host cannot provide WebGPU`).
+- A cart that imports both GL and WebGPU runs here on GL. The host leaves
+  `WC_HOST_FLAG_GPU_WGPU` clear in host-info flags, which is how the cart knows.
+
+Engines that can build both backends into one cart are the way to ship one
+`.wasc` that runs here and on WebGPU hosts.
+
 ## Core Options
 
 - **Internal Resolution**: 640x480, 720p, 1080p, 1440p, 4K — passed to cart as preferred resolution
