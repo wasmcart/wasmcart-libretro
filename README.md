@@ -55,9 +55,10 @@ test/run.sh            # Linux; needs wasi-sdk (WASI_SDK=...) and Mesa's EGL/GLE
 `dlopen`, gives it a GLES3 context on Mesa's surfaceless EGL display (no window),
 and runs small carts built from `test/allocart.c`. They cover the memory the host
 writes into a cart (SPEC.md, "Cart memory the host writes"): GL strings and
-`glMapBufferRange` mappings in blocks from the cart's `wc_alloc`, the deprecated
-`malloc` fallback with its one warning, the clear error for a cart with no
-allocator, and rejected pointers.
+`glMapBufferRange` mappings in blocks from the cart's `wc_alloc`, the clear error
+for a cart without `wc_alloc`/`wc_free` (one that exports only `malloc`, with or
+without `free`, gets the same error: its `malloc` is never used), and rejected
+pointers.
 
 ## Usage
 

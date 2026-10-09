@@ -41,10 +41,10 @@ lacks() { grep -qF -- "$1" "$log" && echo 1 || echo 0; }
 count() { grep -cF -- "$1" "$log"; }
 is() { [ "$1" = "$2" ]; echo $?; }
 
-DEPRECATED="this cart has no wc_alloc/wc_free, so the host is allocating in it through its exported malloc/free"
-NOALLOC="exports no allocator"
+NOALLOC="does not export wc_alloc/wc_free"
+MISSING="glGetString must write into the cart's memory, but the cart does not export wc_alloc/wc_free (its malloc, if any, is not used). Export wc_alloc(size, align) and wc_free(ptr): wasmcart.h defines them for C/C++ (include it), wasmcart's CMake helper exports them, and Rust carts get them from the wasmcart-alloc crate. See SPEC.md, \"Cart memory the host writes\"."
 
-for m in WCALLOC QUIET NONE_HIT MALLOC MISALIGN BAD_OOB BAD_ZERO; do cart $m; done
+for m in WCALLOC QUIET NONE_HIT MALLOC MALLOCFREE MISALIGN BAD_OOB BAD_ZERO; do cart $m; done
 
 echo "wc_alloc cart: GL strings and buffer mappings land in the cart's own allocations"
 run WCALLOC
@@ -52,7 +52,7 @@ expect "runs every frame"            $(has "frames=6 ")
 expect "strings and both mappings check out" $(has "ok=1 ")
 expect "2 strings (cached) + 2 mappings = 4 allocations" $(has "allocs=4 ")
 expect "strings kept, each mapping freed at unmap" $(has "frees=2 ")
-expect "no deprecation warning"      $(lacks "$DEPRECATED")
+expect "no deprecation warning"      $(lacks "deprecat")
 expect "not trapped"                 $(has "trapped=0")
 
 echo "no allocator, never reaches a path: loads and runs"
@@ -60,22 +60,28 @@ run QUIET
 expect "runs every frame"            $(has "frames=6 ")
 expect "ok"                          $(has "ok=1 ")
 expect "no allocator error"          $(lacks "$NOALLOC")
-expect "no deprecation warning"      $(lacks "$DEPRECATED")
+expect "no deprecation warning"      $(lacks "deprecat")
 expect "not trapped"                 $(has "trapped=0")
 
 echo "no allocator, asks for a GL string: a clear error stops the cart"
 run NONE_HIT
-expect "error names glGetString and the fix" $(has "glGetString must write into the cart's memory, but the cart exports no allocator. Export wc_alloc(size, align) and wc_free(ptr)")
+expect "error names glGetString and the fix" $(has "$MISSING")
 expect "cart stopped"                $(has "trapped=1")
 expect "stopped in the frame that asked" $(has "frames=2 ")
 expect "string never handed back"    $(has "ok=0 ")
 
-echo "malloc-only cart: deprecated fallback, one warning"
-run MALLOC
-expect "strings and both mappings check out" $(has "ok=1 ")
-expect "no free: the second mapping reuses the first's block" $(has "allocs=3 ")
-expect "exactly one deprecation warning" $(is "$(count "$DEPRECATED")" 1)
-expect "not trapped"                 $(has "trapped=0")
+# wasmcart 0.32: a cart's malloc is never used. Without wc_alloc/wc_free it
+# gets exactly the no-allocator error, with or without free/memalign.
+for m in MALLOC MALLOCFREE; do
+    echo "$m cart (no wc_alloc): the same error as no allocator"
+    run $m
+    expect "error names glGetString and the fix" $(has "$MISSING")
+    expect "cart stopped"                $(has "trapped=1")
+    expect "stopped in the frame that asked" $(has "frames=2 ")
+    expect "string never handed back"    $(has "ok=0 ")
+    expect "its malloc never called"     $(has "allocs=0 ")
+    expect "no deprecation warning"      $(lacks "deprecat")
+done
 
 echo "wc_alloc ignores alignment: the mapping is rejected"
 run MISALIGN

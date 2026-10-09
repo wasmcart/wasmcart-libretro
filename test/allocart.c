@@ -6,7 +6,9 @@
  *   -DMODE_WCALLOC   exports wc_alloc/wc_free; asks for GL strings
  *   -DMODE_QUIET     exports no allocator; never asks for a string
  *   -DMODE_NONE_HIT  exports no allocator; asks for a GL string
- *   -DMODE_MALLOC    exports only malloc (the deprecated fallback)
+ *   -DMODE_MALLOC    exports only malloc: the host must refuse it like no
+ *                    allocator (wasmcart 0.32 never calls a cart's malloc)
+ *   -DMODE_MALLOCFREE exports malloc, memalign and free: refused the same way
  *   -DMODE_BAD_OOB   wc_alloc answers a pointer past the end of memory
  *   -DMODE_BAD_ZERO  wc_alloc answers 0 (out of memory)
  *   -DMODE_MISALIGN  wc_alloc ignores alignment (fine for strings, which ask
@@ -62,7 +64,7 @@ static struct {
 static u32 pads[4 * 8];
 static u32 time_info[8];
 
-#if defined(MODE_WCALLOC) || defined(MODE_MALLOC) || defined(MODE_MISALIGN)
+#if defined(MODE_WCALLOC) || defined(MODE_MALLOC) || defined(MODE_MALLOCFREE) || defined(MODE_MISALIGN)
 static u8 arena[4096] __attribute__((aligned(16)));
 static u32 arena_top;
 static u32 bump(u32 size, u32 align) {
@@ -82,10 +84,13 @@ static int in_arena(u32 p) { (void)p; return 1; }
 EXPORT("wc_alloc") u32 wc_alloc(u32 size, u32 align) { return bump(size, align); }
 EXPORT("wc_free") void wc_free(u32 ptr) { (void)ptr; save.frees++; }
 #endif
-#ifdef MODE_MALLOC
-/* 16, like wasi-libc and emscripten mallocs (alignof(max_align_t)): the host
-   asks for 16 for a buffer mapping, and a malloc fallback has no way to ask. */
+#if defined(MODE_MALLOC) || defined(MODE_MALLOCFREE)
+/* A working allocator the host must NOT use: any call shows up in allocs. */
 EXPORT("malloc") void* malloc(unsigned long size) { return (void*)bump((u32)size, 16); }
+#endif
+#ifdef MODE_MALLOCFREE
+EXPORT("memalign") void* memalign(unsigned long align, unsigned long size) { return (void*)bump((u32)size, (u32)align); }
+EXPORT("free") void free(void* ptr) { (void)ptr; save.frees++; }
 #endif
 #ifdef MODE_MISALIGN
 EXPORT("wc_alloc") u32 wc_alloc(u32 size, u32 align) { u32 p = bump(size + 1, 1); return p ? (p | 1) : 0; (void)align; }
