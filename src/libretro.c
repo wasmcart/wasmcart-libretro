@@ -238,6 +238,7 @@ void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
 
 static uint32_t pref_width = 1920;
 static uint32_t pref_height = 1080;
+static bool jit_disabled = false;
 
 static const struct retro_core_option_v2_definition option_defs[] = {
     {
@@ -256,6 +257,21 @@ static const struct retro_core_option_v2_definition option_defs[] = {
         },
         "1920x1080"
     },
+    {
+        "wasmcart_jit",
+        "Runtime Code Generation",
+        NULL,
+        "Lets a cart compile code while it runs (wasmcart SPEC.md, \"Runtime code generation\"). "
+        "Off breaks carts built around it: they run slower or not at all, and the core says so on screen. "
+        "Applies when content is loaded.",
+        NULL, "system",
+        {
+            { "enabled",  "Enabled" },
+            { "disabled", "Disabled" },
+            { NULL, NULL },
+        },
+        "enabled"
+    },
     { NULL, NULL, NULL, NULL, NULL, NULL, {{0}}, NULL },
 };
 
@@ -273,6 +289,30 @@ static void check_options(void) {
             pref_height = h;
         }
     }
+    struct retro_variable jit = { "wasmcart_jit", NULL };
+    jit_disabled = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &jit) && jit.value &&
+                   strcmp(jit.value, "disabled") == 0;
+}
+
+// The off switch must be loud (SPEC.md, "Runtime code generation"): on the
+// cart's first JIT call while it is off, tell the player on screen, where
+// they are looking, not only in a log.
+static bool jit_notice_shown = false;
+static void jit_notice_tick(void) {
+    if (jit_notice_shown || !wc_host_jit_notice(host)) return;
+    jit_notice_shown = true;
+    static const char msg[] =
+        "Runtime code generation is OFF (core option or WASMCART_JIT=0). This cart asked for it and runs "
+        "without it: if it is slow or misbehaves, that setting is the cause.";
+    if (log_cb) log_cb(RETRO_LOG_WARN, "wasmcart: %s\n", msg);
+    unsigned ver = 0;
+    struct retro_message_ext ext = { msg, 10000, 3, RETRO_LOG_WARN, RETRO_MESSAGE_TARGET_ALL,
+                                      RETRO_MESSAGE_TYPE_NOTIFICATION, -1 };
+    if (environ_cb(RETRO_ENVIRONMENT_GET_MESSAGE_INTERFACE_VERSION, &ver) && ver >= 1 &&
+        environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &ext))
+        return;
+    struct retro_message legacy = { msg, 600 };
+    environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &legacy);
 }
 
 // ─── Rumble (ABI v3) ───────────────────────────────────────────────────────
@@ -562,6 +602,8 @@ bool retro_load_game(const struct retro_game_info* game) {
     check_options();
     opts.preferred_width = pref_width;
     opts.preferred_height = pref_height;
+    opts.jit_disabled = jit_disabled;
+    jit_notice_shown = false;
     opts.defer_init = true;  // always defer — we'll finish in context_reset or first frame
 
     int rc = wc_host_load_file(host, game->path, &opts);
@@ -636,7 +678,9 @@ void retro_unload_game(void) {
 // ─── Run frame ──────────────────────────────────────────────────────────────
 
 void retro_run(void) {
-    if (!host || wc_host_has_trapped(host)) return;
+    if (!host) return;
+    jit_notice_tick();  // also a JIT call in wc_init, or one that then trapped
+    if (wc_host_has_trapped(host)) return;
 
     // Safety fallback: finish init if context_reset wasn't called
     if (first_frame) {
@@ -841,6 +885,7 @@ void retro_run(void) {
         wc_gl_rebind_redirect();
     }
     wc_host_run_frame(host);
+    jit_notice_tick();
     lr_update_input_descriptors();
 
     if (wc_host_has_trapped(host)) {
