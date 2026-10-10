@@ -113,6 +113,16 @@ Engines that can build both backends into one cart are the way to ship one
 ## Core Options
 
 - **Internal Resolution**: 640x480, 720p, 1080p, 1440p, 4K — passed to cart as preferred resolution
+- **Runtime Code Generation**: Enabled (default) / Disabled, applied when content loads (`WASMCART_JIT=0` in the environment also turns it off). A cart that asks for it while it is off runs without it, and the core shows an on-screen notice on its first request saying so.
+
+## Tests (Linux)
+
+```bash
+cmake -B build -DWASMCART_LIBRETRO_TESTS=ON && cmake --build build
+test/run-tests.sh build <wasmcart-lua cart.wasc> <JIT engine cart.wasc>
+```
+
+`test/lr_frontend` is a headless libretro frontend (Mesa surfaceless EGL). The script restores a save state mid-run, carries a JIT cart's state across a restore and across sessions, and checks the JIT-off notice.
 
 ## Build Targets
 

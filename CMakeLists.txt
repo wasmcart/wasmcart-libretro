@@ -89,6 +89,16 @@ if(NOT WIN32)
     )
 endif()
 
+# ─── Regression tests (Linux): test/run-tests.sh ─────────────────────────
+# lr_frontend is a minimal headless libretro frontend (Mesa surfaceless EGL).
+
+option(WASMCART_LIBRETRO_TESTS "Build the test frontend (needs EGL and GLESv2)" OFF)
+if(WASMCART_LIBRETRO_TESTS AND UNIX AND NOT APPLE AND NOT ANDROID)
+    add_executable(lr_frontend test/lr_frontend.c)
+    target_include_directories(lr_frontend PRIVATE src ${WC_NATIVE}/vendor/gl)
+    target_link_libraries(lr_frontend PRIVATE EGL GLESv2 dl)
+endif()
+
 # ─── Status ──────────────────────────────────────────────────────────────
 
 message(STATUS "")

@@ -32,8 +32,8 @@ static wc_host_t* host = NULL;
 // ─── Input actions → RetroArch input descriptors ─────────────────────────────
 // A cart that declares input actions (wasmcart SPEC.md, "Input actions") gets
 // them named in the frontend's remap screen: "Pedal" instead of "B". Origins
-// stay "unknown" (-1) to the cart: RetroArch does not tell a core which
-// physical input a RetroPad button is on, and the host never guesses.
+// are the RetroPad position on the generic pad (see lr_update_input_devices):
+// RetroArch does not tell a core which physical input a RetroPad button is on.
 #define WC_LR_MAX_ACTIONS 64
 static wc_host_action_t lr_actions[WC_LR_MAX_ACTIONS];
 static struct retro_input_descriptor lr_desc[WC_LR_MAX_ACTIONS * 4 * 4 + 1];
@@ -68,6 +68,28 @@ static int lr_map_input(int input, unsigned out[4][3]) {
         return 4;
     }
     return 0;
+}
+
+// The player's device, as far as libretro tells a core: the device type the
+// frontend plugged into each port (retro_set_controller_port_device; a port
+// is a RetroPad until told otherwise). A RetroPad is a gamepad to the cart.
+// libretro exposes no pad identity (no name, vendor or product, and no binds),
+// so the family stays unknown and origins are the generic pad's labels by
+// position, the same as other hosts give an unidentified pad.
+#define WC_LR_PORTS 4
+static unsigned lr_port_device[WC_LR_PORTS] = {
+    RETRO_DEVICE_JOYPAD, RETRO_DEVICE_JOYPAD, RETRO_DEVICE_JOYPAD, RETRO_DEVICE_JOYPAD };
+static int lr_device_sent[WC_LR_PORTS] = { -1, -1, -1, -1 };
+
+static void lr_update_input_devices(void) {
+    for (int p = 0; p < WC_LR_PORTS; p++) {
+        unsigned base = lr_port_device[p] & RETRO_DEVICE_MASK;
+        int dev = (base == RETRO_DEVICE_JOYPAD || base == RETRO_DEVICE_ANALOG) ? WC_HOST_DEVICE_GAMEPAD
+                                                                               : WC_HOST_DEVICE_UNKNOWN;
+        if (dev == lr_device_sent[p]) continue;
+        lr_device_sent[p] = dev;
+        wc_host_input_device(host, p, dev, 0);
+    }
 }
 
 // Actions are declared in wc_init or later, so this is checked on the first
@@ -238,6 +260,7 @@ void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
 
 static uint32_t pref_width = 1920;
 static uint32_t pref_height = 1080;
+static bool jit_disabled = false;
 
 static const struct retro_core_option_v2_definition option_defs[] = {
     {
@@ -256,6 +279,21 @@ static const struct retro_core_option_v2_definition option_defs[] = {
         },
         "1920x1080"
     },
+    {
+        "wasmcart_jit",
+        "Runtime Code Generation",
+        NULL,
+        "Lets a cart compile code while it runs (wasmcart SPEC.md, \"Runtime code generation\"). "
+        "Off breaks carts built around it: they run slower or not at all, and the core says so on screen. "
+        "Applies when content is loaded.",
+        NULL, "system",
+        {
+            { "enabled",  "Enabled" },
+            { "disabled", "Disabled" },
+            { NULL, NULL },
+        },
+        "enabled"
+    },
     { NULL, NULL, NULL, NULL, NULL, NULL, {{0}}, NULL },
 };
 
@@ -273,6 +311,30 @@ static void check_options(void) {
             pref_height = h;
         }
     }
+    struct retro_variable jit = { "wasmcart_jit", NULL };
+    jit_disabled = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &jit) && jit.value &&
+                   strcmp(jit.value, "disabled") == 0;
+}
+
+// The off switch must be loud (SPEC.md, "Runtime code generation"): on the
+// cart's first JIT call while it is off, tell the player on screen, where
+// they are looking, not only in a log.
+static bool jit_notice_shown = false;
+static void jit_notice_tick(void) {
+    if (jit_notice_shown || !wc_host_jit_notice(host)) return;
+    jit_notice_shown = true;
+    static const char msg[] =
+        "Runtime code generation is OFF (core option or WASMCART_JIT=0). This cart asked for it and runs "
+        "without it: if it is slow or misbehaves, that setting is the cause.";
+    if (log_cb) log_cb(RETRO_LOG_WARN, "wasmcart: %s\n", msg);
+    unsigned ver = 0;
+    struct retro_message_ext ext = { msg, 10000, 3, RETRO_LOG_WARN, RETRO_MESSAGE_TARGET_ALL,
+                                      RETRO_MESSAGE_TYPE_NOTIFICATION, -1 };
+    if (environ_cb(RETRO_ENVIRONMENT_GET_MESSAGE_INTERFACE_VERSION, &ver) && ver >= 1 &&
+        environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &ext))
+        return;
+    struct retro_message legacy = { msg, 600 };
+    environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &legacy);
 }
 
 // ─── Rumble (ABI v3) ───────────────────────────────────────────────────────
@@ -527,6 +589,7 @@ void retro_deinit(void) {
 
 bool retro_load_game(const struct retro_game_info* game) {
     lr_action_count = -1;   // input descriptors are re-sent for the new cart
+    for (int p = 0; p < WC_LR_PORTS; p++) lr_device_sent[p] = -1;  // and devices
     lr_frames = 0;
     if (!host || !game || !game->path) return false;
 
@@ -562,6 +625,8 @@ bool retro_load_game(const struct retro_game_info* game) {
     check_options();
     opts.preferred_width = pref_width;
     opts.preferred_height = pref_height;
+    opts.jit_disabled = jit_disabled;
+    jit_notice_shown = false;
     opts.defer_init = true;  // always defer — we'll finish in context_reset or first frame
 
     int rc = wc_host_load_file(host, game->path, &opts);
@@ -636,7 +701,9 @@ void retro_unload_game(void) {
 // ─── Run frame ──────────────────────────────────────────────────────────────
 
 void retro_run(void) {
-    if (!host || wc_host_has_trapped(host)) return;
+    if (!host) return;
+    jit_notice_tick();  // also a JIT call in wc_init, or one that then trapped
+    if (wc_host_has_trapped(host)) return;
 
     // Safety fallback: finish init if context_reset wasn't called
     if (first_frame) {
@@ -840,7 +907,9 @@ void retro_run(void) {
         extern void wc_gl_rebind_redirect(void);
         wc_gl_rebind_redirect();
     }
+    lr_update_input_devices();
     wc_host_run_frame(host);
+    jit_notice_tick();
     lr_update_input_descriptors();
 
     if (wc_host_has_trapped(host)) {
@@ -985,7 +1054,7 @@ void retro_reset(void) { /* TODO: reload cart? */ }
 unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }
 
 void retro_set_controller_port_device(unsigned port, unsigned device) {
-    (void)port; (void)device;
+    if (port < WC_LR_PORTS) lr_port_device[port] = device;
 }
 
 void retro_cheat_reset(void) {}
