@@ -17,6 +17,13 @@
 #    unplugged (device unknown).
 # 4. Runtime code generation switched off by the core option: the cart's first
 #    JIT call puts the notice on screen (SET_MESSAGE_EXT).
+# 5. A GLES2-only frontend (an old handheld such as a PowerVR SGX544; the
+#    frontend refuses GLES3 and GL core and grants GLES2, with a real ES 2.0
+#    context): a 2D cart (snake, wasmcart-native's fixture) presents through
+#    the software video path; a GL cart is refused with an on-screen message
+#    and the screen stays black. A driver that hands back an ES3 context for
+#    the ES2 request runs the GL cart. On GLES3 the 2D cart still presents
+#    through GL.
 set -u
 BUILD=${1:?build dir}; LUA=${2:?wasmcart-lua cart}; JIT=${3:?JIT engine cart}
 FE="$BUILD/lr_frontend"; CORE="$BUILD/wasmcart_libretro.so"
@@ -46,5 +53,12 @@ if [ "$(grep -c "Press \[A\] to Pedal, \[Left Stick\] to Steer" "$WORK/out.txt")
 else
   echo "FAIL input actions: the device change reaches the cart"; grep "Press" "$WORK/out.txt" | sed 's/^/     /'; fail=$((fail + 1))
 fi
+SNAKE="$(dirname "$0")/../deps/wasmcart-native/test/snake.wasc"
+cp "$SNAKE" "$WORK/snake.wasc"
+run "GLES3: 2D cart presents through GL"      "$WORK/snake.wasc" --frames 60 --expect-video hw
+run "GLES2 only: 2D cart presents in software" "$WORK/snake.wasc" --frames 60 --gles2 real --expect-video sw
+run "GLES2 only: GL cart refused on screen"   "$WORK/lua.wasc" --frames 60 --gles2 real --expect-video black \
+    --expect-message "GLES 3.0 required"
+run "ES2 request, ES3 context: GL cart runs"  "$WORK/lua.wasc" --frames 60 --gles2 es3 --expect-video hw
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

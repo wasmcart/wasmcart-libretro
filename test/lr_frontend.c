@@ -8,11 +8,21 @@
 //   lr_frontend <core.so> <cart.wasc> [--frames N] [--save-at F] [--restore-at F]
 //               [--option key=value]... [--expect-message TEXT]
 //               [--state-out FILE] [--state-in FILE] [--unplug-at F]
+//               [--gles2 real|es3] [--expect-video sw|hw|black]
 //
 // --state-out writes the state taken at --save-at to FILE; --state-in makes
 // --restore-at restore FILE instead, so a state can cross sessions (save,
 // quit, start again, load), which is when a JIT cart's slots are all gone.
 // --unplug-at sets port 0 to RETRO_DEVICE_NONE at that frame.
+// --gles2 plays a GLES2-only frontend (an old handheld such as a PowerVR
+// SGX544): it refuses the GLES3 and GL core requests and grants only GLES2,
+// with an EGL_CONTEXT_CLIENT_VERSION 2 context. "real" caps Mesa at ES 2.0
+// (MESA_GLES_VERSION_OVERRIDE), so ES3 entry points and GLSL ES 3.00 are gone
+// as on that GPU; "es3" keeps what Mesa returns for an ES2 request (ES 3.2),
+// the driver that hands back more than it was asked for.
+// --expect-video: the last frame was a software frame (sw), a hardware frame
+// (hw), or nothing but black was ever shown (black); sw and hw also require pixels
+// that are not all black in the last frame.
 //
 // Exit status: 0 pass; 1 the cart trapped, an expected on-screen message never
 // came, or a call failed; a crash (the bug these tests exist for) is a signal.
@@ -40,6 +50,12 @@ static unsigned long audio_frames = 0;
 
 static struct retro_hw_render_callback hw;
 static GLuint fbo = 0;
+static const char* gles2 = NULL;   /* NULL, "real" or "es3" */
+static int hw_granted = 0;
+static unsigned long sw_frames = 0, hw_frames = 0;
+static unsigned long sw_lit = 0;   /* non-black pixels in the last software frame */
+static unsigned long long sw_rgb[3], hw_rgb[3];   /* channel sums of the last frame */
+static unsigned last_w = 0, last_h = 0;
 
 static void note_message(const char* msg) {
     printf("lr_frontend: MESSAGE: %s\n", msg);
@@ -73,7 +89,9 @@ static bool env_cb(unsigned cmd, void* data) {
     }
     case RETRO_ENVIRONMENT_SET_HW_RENDER: {
         struct retro_hw_render_callback* cb = data;
-        if (cb->context_type != RETRO_HW_CONTEXT_OPENGLES3) return false;
+        unsigned want = gles2 ? RETRO_HW_CONTEXT_OPENGLES2 : RETRO_HW_CONTEXT_OPENGLES3;
+        if (cb->context_type != want) return false;
+        hw_granted = 1;
         cb->get_current_framebuffer = get_fb;
         cb->get_proc_address = get_proc;
         hw = *cb;
@@ -101,7 +119,21 @@ static bool env_cb(unsigned cmd, void* data) {
     }
 }
 
-static void video_cb(const void* d, unsigned w, unsigned h, size_t pitch) { (void)d; (void)w; (void)h; (void)pitch; }
+static void video_cb(const void* d, unsigned w, unsigned h, size_t pitch) {
+    if (!d) return;   /* dupe */
+    last_w = w; last_h = h;
+    if (d == RETRO_HW_FRAME_BUFFER_VALID) { hw_frames++; return; }
+    sw_frames++;
+    sw_lit = 0;
+    sw_rgb[0] = sw_rgb[1] = sw_rgb[2] = 0;
+    for (unsigned y = 0; y < h; y++) {
+        const unsigned char* row = (const unsigned char*)d + y * pitch;
+        for (unsigned x = 0; x < w; x++) {   /* XRGB8888: B, G, R, X in memory */
+            if (row[x * 4] | row[x * 4 + 1] | row[x * 4 + 2]) sw_lit++;
+            for (int c = 0; c < 3; c++) sw_rgb[c] += row[x * 4 + 2 - c];
+        }
+    }
+}
 static size_t audio_batch_cb(const int16_t* d, size_t frames) { (void)d; audio_frames += frames; return frames; }
 static void audio_cb(int16_t l, int16_t r) { (void)l; (void)r; }
 static void input_poll_cb(void) {}
@@ -116,15 +148,19 @@ static int egl_setup(unsigned w, unsigned h) {
     EGLDisplay dpy = get_display ? get_display(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL)
                                  : EGL_NO_DISPLAY;
     if (dpy == EGL_NO_DISPLAY || !eglInitialize(dpy, NULL, NULL)) return 0;
-    static const EGLint cfg_attr[] = { EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_SURFACE_TYPE, 0, EGL_NONE };
+    const EGLint cfg_attr[] = { EGL_RENDERABLE_TYPE, gles2 ? EGL_OPENGL_ES2_BIT : EGL_OPENGL_ES3_BIT,
+                                EGL_SURFACE_TYPE, 0, EGL_NONE };
     EGLConfig cfg;
     EGLint n = 0;
     if (!eglChooseConfig(dpy, cfg_attr, &cfg, 1, &n) || n < 1) return 0;
     eglBindAPI(EGL_OPENGL_ES_API);
-    static const EGLint ctx_attr[] = { EGL_CONTEXT_MAJOR_VERSION, 3, EGL_NONE };
+    const EGLint ctx_attr[] = { EGL_CONTEXT_CLIENT_VERSION, gles2 ? 2 : 3, EGL_NONE };
     EGLContext ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctx_attr);
     if (ctx == EGL_NO_CONTEXT || !eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) return 0;
-    // The frontend's framebuffer: what RetroArch's hw_render FBO is.
+    printf("lr_frontend: context %s\n", (const char*)glGetString(GL_VERSION));
+    // The frontend's framebuffer: what RetroArch's hw_render FBO is. Built
+    // with what ES 2.0 has (OES_rgb8_rgba8, OES_packed_depth_stencil: same
+    // enum values as the ES3 ones), depth and stencil attached separately.
     GLuint rb[2];
     glGenFramebuffers(1, &fbo);
     glGenRenderbuffers(2, rb);
@@ -134,7 +170,10 @@ static int egl_setup(unsigned w, unsigned h) {
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb[0]);
     glBindRenderbuffer(GL_RENDERBUFFER, rb[1]);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
     return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
 }
 
@@ -150,6 +189,7 @@ int main(int argc, char** argv) {
     const char* state_out = NULL;
     const char* state_in = NULL;
     long unplug_at = -1;
+    const char* expect_video = NULL;
     for (int i = 3; i + 1 < argc; i += 2) {
         if (!strcmp(argv[i], "--frames")) frames = atol(argv[i + 1]);
         else if (!strcmp(argv[i], "--save-at")) save_at = atol(argv[i + 1]);
@@ -158,6 +198,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--state-out")) state_out = argv[i + 1];
         else if (!strcmp(argv[i], "--state-in")) state_in = argv[i + 1];
         else if (!strcmp(argv[i], "--unplug-at")) unplug_at = atol(argv[i + 1]);
+        else if (!strcmp(argv[i], "--gles2")) gles2 = argv[i + 1];
+        else if (!strcmp(argv[i], "--expect-video")) expect_video = argv[i + 1];
         else if (!strcmp(argv[i], "--option") && opt_count < MAX_OPTIONS) {
             char* eq = strchr(argv[i + 1], '=');
             if (!eq) return 2;
@@ -166,6 +208,10 @@ int main(int argc, char** argv) {
             opt_val[opt_count++] = eq + 1;
         } else { fprintf(stderr, "lr_frontend: unknown argument %s\n", argv[i]); return 2; }
     }
+
+    if (gles2 && strcmp(gles2, "real") && strcmp(gles2, "es3")) return 2;
+    // Before the first context exists: Mesa reads it once.
+    if (gles2 && !strcmp(gles2, "real")) setenv("MESA_GLES_VERSION_OVERRIDE", "2.0", 1);
 
     void* core = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!core) { fprintf(stderr, "lr_frontend: %s\n", dlerror()); return 1; }
@@ -205,8 +251,11 @@ int main(int argc, char** argv) {
     retro_get_system_av_info(&av);
     unsigned w = av.geometry.max_width ? av.geometry.max_width : 1920;
     unsigned h = av.geometry.max_height ? av.geometry.max_height : 1080;
-    if (!egl_setup(w, h)) { fprintf(stderr, "lr_frontend: no surfaceless EGL GLES3 context\n"); return 1; }
-    if (hw.context_reset) hw.context_reset();
+    // A frontend that granted no hardware context still has a GL context of
+    // its own (it draws its menu with it); the core must not touch it.
+    if (!egl_setup(w, h)) { fprintf(stderr, "lr_frontend: no surfaceless EGL context\n"); return 1; }
+    printf("lr_frontend: hardware context %s\n", hw_granted ? "granted" : "not requested or refused");
+    if (hw_granted && hw.context_reset) hw.context_reset();
 
     void* state = NULL;
     size_t state_size = 0;
@@ -244,6 +293,33 @@ int main(int argc, char** argv) {
     fflush(stdout);
     // _exit throughout: V8 teardown at exit is not what is under test.
     if (trapped) { printf("lr_frontend: FAIL: the cart trapped\n"); fflush(stdout); _exit(1); }
+    unsigned long hw_lit = 0;
+    if (hw_frames && last_w && last_h) {
+        // What the core left in the frontend's framebuffer for the last frame.
+        unsigned char* px = malloc((size_t)last_w * last_h * 4);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glReadPixels(0, 0, last_w, last_h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        for (size_t i = 0; px && i < (size_t)last_w * last_h; i++) {
+            if (px[i * 4] | px[i * 4 + 1] | px[i * 4 + 2]) hw_lit++;
+            for (int c = 0; c < 3; c++) hw_rgb[c] += px[i * 4 + c];
+        }
+        free(px);
+    }
+    printf("lr_frontend: video %lu software frames (last %ux%u, %lu lit, RGB sums %llu %llu %llu), "
+           "%lu hardware frames (%lu lit, RGB sums %llu %llu %llu)\n",
+           sw_frames, last_w, last_h, sw_lit, sw_rgb[0], sw_rgb[1], sw_rgb[2],
+           hw_frames, hw_lit, hw_rgb[0], hw_rgb[1], hw_rgb[2]);
+    if (expect_video) {
+        int ok = !strcmp(expect_video, "sw")   ? sw_frames > 0 && sw_lit > 0 && hw_frames == 0
+               : !strcmp(expect_video, "hw")   ? hw_frames > 0 && hw_lit > 0 && sw_frames == 0
+               : !strcmp(expect_video, "black") ? sw_frames == 0 && hw_lit == 0
+               : 0;
+        if (!ok) {
+            printf("lr_frontend: FAIL: expected video \"%s\"\n", expect_video);
+            fflush(stdout);
+            _exit(1);
+        }
+    }
     if (expect_message && !got_message) {
         printf("lr_frontend: FAIL: no on-screen message containing \"%s\"\n", expect_message);
         fflush(stdout);
