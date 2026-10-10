@@ -70,6 +70,28 @@ static int lr_map_input(int input, unsigned out[4][3]) {
     return 0;
 }
 
+// The player's device, as far as libretro tells a core: the device type the
+// frontend plugged into each port (retro_set_controller_port_device; a port
+// is a RetroPad until told otherwise). A RetroPad is a gamepad to the cart.
+// libretro exposes no pad identity (no name, vendor or product, and no binds),
+// so the family stays unknown and origins are the generic pad's labels by
+// position, the same as other hosts give an unidentified pad.
+#define WC_LR_PORTS 4
+static unsigned lr_port_device[WC_LR_PORTS] = {
+    RETRO_DEVICE_JOYPAD, RETRO_DEVICE_JOYPAD, RETRO_DEVICE_JOYPAD, RETRO_DEVICE_JOYPAD };
+static int lr_device_sent[WC_LR_PORTS] = { -1, -1, -1, -1 };
+
+static void lr_update_input_devices(void) {
+    for (int p = 0; p < WC_LR_PORTS; p++) {
+        unsigned base = lr_port_device[p] & RETRO_DEVICE_MASK;
+        int dev = (base == RETRO_DEVICE_JOYPAD || base == RETRO_DEVICE_ANALOG) ? WC_HOST_DEVICE_GAMEPAD
+                                                                               : WC_HOST_DEVICE_UNKNOWN;
+        if (dev == lr_device_sent[p]) continue;
+        lr_device_sent[p] = dev;
+        wc_host_input_device(host, p, dev, 0);
+    }
+}
+
 // Actions are declared in wc_init or later, so this is checked on the first
 // frame and then once a second; descriptors are re-sent only on a change.
 static void lr_update_input_descriptors(void) {
@@ -567,6 +589,7 @@ void retro_deinit(void) {
 
 bool retro_load_game(const struct retro_game_info* game) {
     lr_action_count = -1;   // input descriptors are re-sent for the new cart
+    for (int p = 0; p < WC_LR_PORTS; p++) lr_device_sent[p] = -1;  // and devices
     lr_frames = 0;
     if (!host || !game || !game->path) return false;
 
@@ -884,6 +907,7 @@ void retro_run(void) {
         extern void wc_gl_rebind_redirect(void);
         wc_gl_rebind_redirect();
     }
+    lr_update_input_devices();
     wc_host_run_frame(host);
     jit_notice_tick();
     lr_update_input_descriptors();
@@ -1030,7 +1054,7 @@ void retro_reset(void) { /* TODO: reload cart? */ }
 unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }
 
 void retro_set_controller_port_device(unsigned port, unsigned device) {
-    (void)port; (void)device;
+    if (port < WC_LR_PORTS) lr_port_device[port] = device;
 }
 
 void retro_cheat_reset(void) {}
