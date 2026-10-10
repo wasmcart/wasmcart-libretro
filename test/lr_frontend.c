@@ -9,6 +9,7 @@
 //               [--option key=value]... [--expect-message TEXT]
 //               [--state-out FILE] [--state-in FILE] [--unplug-at F]
 //               [--gles2 real|es3] [--expect-video sw|hw|black]
+//               [--expect-pixel X,Y,RRGGBB]
 //
 // --state-out writes the state taken at --save-at to FILE; --state-in makes
 // --restore-at restore FILE instead, so a state can cross sessions (save,
@@ -23,6 +24,8 @@
 // --expect-video: the last frame was a software frame (sw), a hardware frame
 // (hw), or nothing but black was ever shown (black); sw and hw also require pixels
 // that are not all black in the last frame.
+// --expect-pixel: the last frame (software or hardware) has that colour at
+// X,Y, counted from the top-left of the cart's image (channel order check).
 //
 // Exit status: 0 pass; 1 the cart trapped, an expected on-screen message never
 // came, or a call failed; a crash (the bug these tests exist for) is a signal.
@@ -55,6 +58,8 @@ static int hw_granted = 0;
 static unsigned long sw_frames = 0, hw_frames = 0;
 static unsigned long sw_lit = 0;   /* non-black pixels in the last software frame */
 static unsigned long long sw_rgb[3], hw_rgb[3];   /* channel sums of the last frame */
+static long px_x = -1, px_y = -1;
+static unsigned px_want = 0, px_got = 0xffffffffu;
 static unsigned last_w = 0, last_h = 0;
 
 static void note_message(const char* msg) {
@@ -131,6 +136,8 @@ static void video_cb(const void* d, unsigned w, unsigned h, size_t pitch) {
         for (unsigned x = 0; x < w; x++) {   /* XRGB8888: B, G, R, X in memory */
             if (row[x * 4] | row[x * 4 + 1] | row[x * 4 + 2]) sw_lit++;
             for (int c = 0; c < 3; c++) sw_rgb[c] += row[x * 4 + 2 - c];
+            if ((long)x == px_x && (long)y == px_y)
+                px_got = (unsigned)row[x * 4 + 2] << 16 | (unsigned)row[x * 4 + 1] << 8 | row[x * 4];
         }
     }
 }
@@ -200,6 +207,9 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--unplug-at")) unplug_at = atol(argv[i + 1]);
         else if (!strcmp(argv[i], "--gles2")) gles2 = argv[i + 1];
         else if (!strcmp(argv[i], "--expect-video")) expect_video = argv[i + 1];
+        else if (!strcmp(argv[i], "--expect-pixel")) {
+            if (sscanf(argv[i + 1], "%ld,%ld,%x", &px_x, &px_y, &px_want) != 3) return 2;
+        }
         else if (!strcmp(argv[i], "--option") && opt_count < MAX_OPTIONS) {
             char* eq = strchr(argv[i + 1], '=');
             if (!eq) return 2;
@@ -303,12 +313,25 @@ int main(int argc, char** argv) {
             if (px[i * 4] | px[i * 4 + 1] | px[i * 4 + 2]) hw_lit++;
             for (int c = 0; c < 3; c++) hw_rgb[c] += px[i * 4 + c];
         }
+        // bottom_left_origin: row 0 of the read-back is the image's bottom row
+        if (px && px_x >= 0 && px_x < (long)last_w && px_y >= 0 && px_y < (long)last_h) {
+            const unsigned char* q = px + ((size_t)(last_h - 1 - px_y) * last_w + px_x) * 4;
+            px_got = (unsigned)q[0] << 16 | (unsigned)q[1] << 8 | q[2];
+        }
         free(px);
     }
     printf("lr_frontend: video %lu software frames (last %ux%u, %lu lit, RGB sums %llu %llu %llu), "
            "%lu hardware frames (%lu lit, RGB sums %llu %llu %llu)\n",
            sw_frames, last_w, last_h, sw_lit, sw_rgb[0], sw_rgb[1], sw_rgb[2],
            hw_frames, hw_lit, hw_rgb[0], hw_rgb[1], hw_rgb[2]);
+    if (px_x >= 0) {
+        printf("lr_frontend: pixel %ld,%ld is %06x\n", px_x, px_y, px_got);
+        if (px_got != px_want) {
+            printf("lr_frontend: FAIL: expected %06x at %ld,%ld\n", px_want, px_x, px_y);
+            fflush(stdout);
+            _exit(1);
+        }
+    }
     if (expect_video) {
         int ok = !strcmp(expect_video, "sw")   ? sw_frames > 0 && sw_lit > 0 && hw_frames == 0
                : !strcmp(expect_video, "hw")   ? hw_frames > 0 && hw_lit > 0 && sw_frames == 0

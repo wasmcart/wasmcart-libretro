@@ -55,8 +55,11 @@ else
 fi
 SNAKE="$(dirname "$0")/../deps/wasmcart-native/test/snake.wasc"
 cp "$SNAKE" "$WORK/snake.wasc"
-run "GLES3: 2D cart presents through GL"      "$WORK/snake.wasc" --frames 60 --expect-video hw
-run "GLES2 only: 2D cart presents in software" "$WORK/snake.wasc" --frames 60 --gles2 real --expect-video sw
+# Snake's food at 162,194 is ff2222 (red) in its ARGB8888 framebuffer:
+# the GL upload once showed it blue (2222ff).
+run "GLES3: 2D cart presents through GL"      "$WORK/snake.wasc" --frames 60 --expect-video hw --expect-pixel 162,194,ff2222
+run "GLES2 only: 2D cart presents in software" "$WORK/snake.wasc" --frames 60 --gles2 real --expect-video sw \
+    --expect-pixel 162,194,ff2222
 run "GLES2 only: GL cart refused on screen"   "$WORK/lua.wasc" --frames 60 --gles2 real --expect-video black \
     --expect-message "GLES 3.0 required"
 run "ES2 request, ES3 context: GL cart runs"  "$WORK/lua.wasc" --frames 60 --gles2 es3 --expect-video hw
