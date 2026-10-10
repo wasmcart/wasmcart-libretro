@@ -7,11 +7,12 @@
 //
 //   lr_frontend <core.so> <cart.wasc> [--frames N] [--save-at F] [--restore-at F]
 //               [--option key=value]... [--expect-message TEXT]
-//               [--state-out FILE] [--state-in FILE]
+//               [--state-out FILE] [--state-in FILE] [--unplug-at F]
 //
 // --state-out writes the state taken at --save-at to FILE; --state-in makes
 // --restore-at restore FILE instead, so a state can cross sessions (save,
 // quit, start again, load), which is when a JIT cart's slots are all gone.
+// --unplug-at sets port 0 to RETRO_DEVICE_NONE at that frame.
 //
 // Exit status: 0 pass; 1 the cart trapped, an expected on-screen message never
 // came, or a call failed; a crash (the bug these tests exist for) is a signal.
@@ -148,6 +149,7 @@ int main(int argc, char** argv) {
     long frames = 300, save_at = -1, restore_at = -1;
     const char* state_out = NULL;
     const char* state_in = NULL;
+    long unplug_at = -1;
     for (int i = 3; i + 1 < argc; i += 2) {
         if (!strcmp(argv[i], "--frames")) frames = atol(argv[i + 1]);
         else if (!strcmp(argv[i], "--save-at")) save_at = atol(argv[i + 1]);
@@ -155,6 +157,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--expect-message")) expect_message = argv[i + 1];
         else if (!strcmp(argv[i], "--state-out")) state_out = argv[i + 1];
         else if (!strcmp(argv[i], "--state-in")) state_in = argv[i + 1];
+        else if (!strcmp(argv[i], "--unplug-at")) unplug_at = atol(argv[i + 1]);
         else if (!strcmp(argv[i], "--option") && opt_count < MAX_OPTIONS) {
             char* eq = strchr(argv[i + 1], '=');
             if (!eq) return 2;
@@ -180,10 +183,12 @@ int main(int argc, char** argv) {
     bool (*retro_serialize)(void*, size_t);
     bool (*retro_unserialize)(const void*, size_t);
     void (*retro_unload_game)(void);
+    void (*retro_set_controller_port_device)(unsigned, unsigned);
     SYM(retro_set_environment); SYM(retro_set_video_refresh); SYM(retro_set_audio_sample);
     SYM(retro_set_audio_sample_batch); SYM(retro_set_input_poll); SYM(retro_set_input_state);
     SYM(retro_init); SYM(retro_load_game); SYM(retro_get_system_av_info); SYM(retro_run);
     SYM(retro_serialize_size); SYM(retro_serialize); SYM(retro_unserialize); SYM(retro_unload_game);
+    SYM(retro_set_controller_port_device);
 
     retro_set_environment(env_cb);
     retro_set_video_refresh(video_cb);
@@ -229,6 +234,10 @@ int main(int argc, char** argv) {
         if (f == restore_at) {
             if (!state || !retro_unserialize(state, state_size)) { fprintf(stderr, "lr_frontend: unserialize failed\n"); return 1; }
             printf("lr_frontend: frame %ld restored\n", f);
+        }
+        if (f == unplug_at) {
+            retro_set_controller_port_device(0, RETRO_DEVICE_NONE);
+            printf("lr_frontend: frame %ld port 0 unplugged\n", f);
         }
         retro_run();
     }

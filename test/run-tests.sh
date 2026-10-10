@@ -11,7 +11,11 @@
 #    sessions (state saved, core started again, state loaded): the core must
 #    unlink every slot and change wc_jit_config key 7, or the engine calls a
 #    slot that is gone and traps.
-# 3. Runtime code generation switched off by the core option: the cart's first
+# 3. Input actions: the port's device type reaches the cart. The action cart
+#    (wasmcart-native's test fixture) logs its prompt on every input revision:
+#    once at start (port 0 is a RetroPad, a gamepad), once more when port 0 is
+#    unplugged (device unknown).
+# 4. Runtime code generation switched off by the core option: the cart's first
 #    JIT call puts the notice on screen (SET_MESSAGE_EXT).
 set -u
 BUILD=${1:?build dir}; LUA=${2:?wasmcart-lua cart}; JIT=${3:?JIT engine cart}
@@ -34,5 +38,13 @@ run "JIT cart: save a state"                  "$WORK/jit.wasc" --frames 160 --sa
 run "JIT cart: load it in a new session"      "$WORK/jit.wasc" --frames 300 --restore-at 100 --state-in "$WORK/jit.state"
 run "JIT off: notice on screen"               "$WORK/jit.wasc" --frames 60 --option wasmcart_jit=disabled \
     --expect-message "Runtime code generation is OFF"
+ACTION="$(dirname "$0")/../deps/wasmcart-native/test/actioncart.wasc"
+cp "$ACTION" "$WORK/action.wasc"
+run "input actions: the action cart runs"     "$WORK/action.wasc" --frames 30 --unplug-at 15
+if [ "$(grep -c "Press \[A\] to Pedal, \[Left Stick\] to Steer" "$WORK/out.txt")" -eq 2 ]; then
+  echo "ok   input actions: the device change reaches the cart"; pass=$((pass + 1))
+else
+  echo "FAIL input actions: the device change reaches the cart"; grep "Press" "$WORK/out.txt" | sed 's/^/     /'; fail=$((fail + 1))
+fi
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
