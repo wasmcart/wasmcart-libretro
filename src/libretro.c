@@ -120,6 +120,13 @@ static void lr_update_input_descriptors(void) {
 }
 static bool uses_gl = false;
 static bool gl_context_ready = false;
+// A 2D cart presents its framebuffer through the software video path (no
+// hardware context) when the frontend has no GLES3 / GL 3.3 context for it.
+static bool sw_video = false;
+static struct retro_hw_render_callback hw_render;  // persists — RetroArch fills callbacks
+// A GL cart on a context older than GLES 3.0: it never starts, and the frontend
+// framebuffer is cleared to black instead.
+static bool gl_refused = false;
 static bool first_frame = true;
 static uint32_t cart_w = 0, cart_h = 0;
 // Largest geometry we have told RetroArch about (sizes its HW render FBO).
@@ -316,25 +323,48 @@ static void check_options(void) {
                    strcmp(jit.value, "disabled") == 0;
 }
 
-// The off switch must be loud (SPEC.md, "Runtime code generation"): on the
-// cart's first JIT call while it is off, tell the player on screen, where
-// they are looking, not only in a log.
-static bool jit_notice_shown = false;
-static void jit_notice_tick(void) {
-    if (jit_notice_shown || !wc_host_jit_notice(host)) return;
-    jit_notice_shown = true;
-    static const char msg[] =
-        "Runtime code generation is OFF (core option or WASMCART_JIT=0). This cart asked for it and runs "
-        "without it: if it is slow or misbehaves, that setting is the cause.";
-    if (log_cb) log_cb(RETRO_LOG_WARN, "wasmcart: %s\n", msg);
+// Tell the player on screen, where they are looking, and the log.
+static void notify(const char* msg, enum retro_log_level level, unsigned ms) {
+    if (log_cb) log_cb(level, "wasmcart: %s\n", msg);
     unsigned ver = 0;
-    struct retro_message_ext ext = { msg, 10000, 3, RETRO_LOG_WARN, RETRO_MESSAGE_TARGET_ALL,
+    struct retro_message_ext ext = { msg, ms, 3, level, RETRO_MESSAGE_TARGET_ALL,
                                       RETRO_MESSAGE_TYPE_NOTIFICATION, -1 };
     if (environ_cb(RETRO_ENVIRONMENT_GET_MESSAGE_INTERFACE_VERSION, &ver) && ver >= 1 &&
         environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &ext))
         return;
-    struct retro_message legacy = { msg, 600 };
+    struct retro_message legacy = { msg, ms * 60 / 1000 };
     environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &legacy);
+}
+
+// The off switch must be loud (SPEC.md, "Runtime code generation"): on the
+// cart's first JIT call while it is off, tell the player.
+static bool jit_notice_shown = false;
+static void jit_notice_tick(void) {
+    if (jit_notice_shown || !wc_host_jit_notice(host)) return;
+    jit_notice_shown = true;
+    notify("Runtime code generation is OFF (core option or WASMCART_JIT=0). This cart asked for it and runs "
+           "without it: if it is slow or misbehaves, that setting is the cause.",
+           RETRO_LOG_WARN, 10000);
+}
+
+// The wasmcart GL surface is OpenGL ES 3.0 (SPEC.md, "GL surface"), and the
+// core's own presentation (blits, VAOs, GLSL ES 3.00) needs it too. A
+// frontend asked for GLES2 may still hand back an ES3 context, so the
+// version that counts is the one the context reports. Desktop GL: 3.3 core.
+static bool gl_context_is_es3(char* what, size_t cap) {
+    typedef const unsigned char* (*get_string_fn)(unsigned);
+    get_string_fn get_string = hw_render.get_proc_address
+        ? (get_string_fn)hw_render.get_proc_address("glGetString") : NULL;
+    const char* v = get_string ? (const char*)get_string(GL_VERSION) : NULL;
+    snprintf(what, cap, "%s", v ? v : "no GL_VERSION");
+    if (!v) return false;
+    int major = 0, minor = 0;
+    if (strncmp(v, "OpenGL ES", 9) == 0) {
+        const char* p = v + 9;
+        while (*p && (*p < '0' || *p > '9')) p++;
+        return sscanf(p, "%d.%d", &major, &minor) == 2 && major >= 3;
+    }
+    return sscanf(v, "%d.%d", &major, &minor) == 2 && (major > 3 || (major == 3 && minor >= 3));
 }
 
 // ─── Rumble (ABI v3) ───────────────────────────────────────────────────────
@@ -443,10 +473,58 @@ void retro_get_system_av_info(struct retro_system_av_info* info) {
 
 // ─── HW render (GL carts) ───────────────────────────────────────────────────
 
-static struct retro_hw_render_callback hw_render;  // persists — RetroArch fills callbacks
+// Tell the frontend the size the cart really has after init.
+static void announce_cart_size(uint32_t w, uint32_t h) {
+    // SET_SYSTEM_AV_INFO forces a full video reinit, and that tears down the
+    // GL context the cart just built its shaders and textures in (context_destroy,
+    // then a fresh context the cart cannot rebuild into). On Batocera/Pi5 (Mesa
+    // V3D, Wayland) every GL cart then drew with GL_INVALID_OPERATION or
+    // segfaulted a frame in. RetroArch's HW FBO is already sized from
+    // max_w/max_h, so when the cart fits, SET_GEOMETRY -- which never reinits --
+    // is all that is needed. It is applied from retro_run rather than here
+    // because context_reset is still inside RetroArch's video init. Only a cart
+    // that outgrows the declared max takes the reinit path; cache_context (set
+    // at load) asks RetroArch to keep the context alive even then.
+    if (w <= max_w && h <= max_h) {
+        geometry_pending = true;
+        wc_log("wasmcart: geometry %ux%u (within max %ux%u, SET_GEOMETRY on next frame)\n", w, h, max_w, max_h);
+        return;
+    }
+    struct retro_system_av_info av = {0};
+    av.geometry.base_width = w;
+    av.geometry.base_height = h;
+    av.geometry.max_width = w;
+    av.geometry.max_height = h;
+    av.geometry.aspect_ratio = (float)w / (float)h;
+    av.timing.fps = 60.0;
+    const wc_cart_info_t* ci = wc_host_get_cart_info(host);
+    av.timing.sample_rate = ci->audio_sample_rate ? (double)ci->audio_sample_rate : 48000.0;
+    max_w = w;
+    max_h = h;
+    environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
+    wc_log("wasmcart: SET_SYSTEM_AV_INFO %ux%u (exceeded declared max)\n", w, h);
+}
 
 static void on_context_reset(void) {
     if (log_cb) log_cb(RETRO_LOG_INFO, "wasmcart: GL context reset\n");
+
+    char version[160];
+    if (!gl_context_is_es3(version, sizeof version)) {
+        if (!uses_gl) {
+            // A frontend that said yes to GLES3 / GL core and then gave less:
+            // a 2D cart does not need GL, so it presents in software.
+            sw_video = true;
+            wc_log("wasmcart: context is \"%s\", not GLES 3.0: 2D cart presents in software\n", version);
+            return;
+        }
+        gl_refused = true;
+        char msg[320];
+        snprintf(msg, sizeof msg,
+                 "This cart needs OpenGL ES 3.0 (GLES 3.0 required); the frontend's GL context is \"%s\". "
+                 "The cart is not started.", version);
+        notify(msg, RETRO_LOG_ERROR, 30000);
+        return;
+    }
     gl_context_ready = true;
 
     // Get RetroArch's hw render callbacks
@@ -505,40 +583,8 @@ static void on_context_reset(void) {
         // resized, and cart_w/h then equals the preference anyway. What a cart
         // reports after init is the authority, so use it verbatim and let
         // RetroArch scale to the window -- that is what a frontend is for.
-        uint32_t redir_w = cart_w;
-        uint32_t redir_h = cart_h;
-        wc_gl_setup_redirect(redir_w, redir_h);
-
-        // Tell RetroArch the cart's real size. SET_SYSTEM_AV_INFO forces a full
-        // video reinit, and that tears down the GL context the cart just built
-        // its shaders and textures in (context_destroy, then a fresh context the
-        // cart cannot rebuild into). On Batocera/Pi5 (Mesa V3D, Wayland) every
-        // GL cart then drew with GL_INVALID_OPERATION or segfaulted a frame in.
-        // RetroArch's HW FBO is already sized from max_w/max_h, so when the
-        // cart fits, SET_GEOMETRY -- which never reinits -- is all that is
-        // needed. It is applied from retro_run rather than here because we are
-        // still inside RetroArch's video init. Only a cart that outgrows the
-        // declared max takes the reinit path; cache_context (set at load) asks
-        // RetroArch to keep the context alive even then.
-        if (redir_w <= max_w && redir_h <= max_h) {
-            geometry_pending = true;
-            wc_log("wasmcart: geometry %ux%u (within max %ux%u, SET_GEOMETRY on next frame)\n",
-                   redir_w, redir_h, max_w, max_h);
-        } else {
-            struct retro_system_av_info av = {0};
-            av.geometry.base_width = redir_w;
-            av.geometry.base_height = redir_h;
-            av.geometry.max_width = redir_w;
-            av.geometry.max_height = redir_h;
-            av.geometry.aspect_ratio = (float)redir_w / (float)redir_h;
-            av.timing.fps = 60.0;
-            const wc_cart_info_t* ci2 = wc_host_get_cart_info(host);
-            av.timing.sample_rate = ci2->audio_sample_rate ? (double)ci2->audio_sample_rate : 48000.0;
-            max_w = redir_w;
-            max_h = redir_h;
-            environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
-            wc_log("wasmcart: SET_SYSTEM_AV_INFO %ux%u (exceeded declared max)\n", redir_w, redir_h);
-        }
+        wc_gl_setup_redirect(cart_w, cart_h);
+        announce_cart_size(cart_w, cart_h);
 
         // Save cart's initial GL state so restore works on first frame
         save_cart_gl_state();
@@ -647,8 +693,14 @@ bool retro_load_game(const struct retro_game_info* game) {
     if (log_cb) log_cb(RETRO_LOG_INFO, "wasmcart: loaded %s (%ux%u, %s)\n",
         manifest->name, cart_w, cart_h, uses_gl ? "GL" : "2D");
 
-    // Always request HW render — unified GL display path for all carts.
-    // 2D carts get their framebuffer uploaded to the redirect FBO as a texture.
+    // Request HW render — unified GL display path for all carts. 2D carts get
+    // their framebuffer uploaded to the redirect FBO as a texture, which needs
+    // GLES3 or GL 3.3 core like a GL cart does; without one they present
+    // through the software video path instead.
+    sw_video = false;
+    gl_refused = false;
+    gl_context_ready = false;
+    first_frame = true;
     memset(&hw_render, 0, sizeof(hw_render));
     hw_render.context_reset = on_context_reset;
     hw_render.context_destroy = on_context_destroy;
@@ -671,15 +723,24 @@ bool retro_load_game(const struct retro_game_info* game) {
         hw_render.version_minor = 3;
         if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
             got_context = true;
-        } else {
+        } else if (uses_gl) {
+            // GLES2-only frontends (old handhelds such as a PowerVR SGX544).
+            // Some drivers hand back an ES3 context for an ES2 request:
+            // on_context_reset checks the version the context reports, and
+            // refuses the cart if it is below ES 3.0.
             hw_render.context_type = RETRO_HW_CONTEXT_OPENGLES2;
             hw_render.version_major = 2;
             hw_render.version_minor = 0;
             got_context = environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render);
         }
     }
-    if (!got_context) {
-        if (log_cb) log_cb(RETRO_LOG_ERROR, "wasmcart: failed to get HW render context\n");
+    if (!got_context && !uses_gl) {
+        memset(&hw_render, 0, sizeof(hw_render));
+        sw_video = true;
+        if (log_cb) log_cb(RETRO_LOG_INFO, "wasmcart: no GLES3 / GL 3.3 context: 2D cart presents in software\n");
+    } else if (!got_context) {
+        notify("This cart needs OpenGL ES 3.0 (GLES 3.0 required), and the frontend offers no GL context "
+               "for it. The cart is not started.", RETRO_LOG_ERROR, 30000);
         return false;
     }
 
@@ -702,6 +763,20 @@ void retro_unload_game(void) {
 
 void retro_run(void) {
     if (!host) return;
+    if (gl_refused) {
+        // The cart never starts. Clear the frontend's framebuffer (ES 2.0
+        // calls only) so the screen is black, not whatever it held.
+        static bool procs = false;
+        if (!procs) { wc_gl_procs_load((void*)hw_render.get_proc_address); procs = true; }
+        if (hw_render.get_current_framebuffer && p_glClear) {
+            glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)hw_render.get_current_framebuffer());
+            glViewport(0, 0, cart_w, cart_h);
+            glClearColor(0, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            video_cb(RETRO_HW_FRAME_BUFFER_VALID, cart_w, cart_h, 0);
+        }
+        return;
+    }
     jit_notice_tick();  // also a JIT call in wc_init, or one that then trapped
     if (wc_host_has_trapped(host)) return;
 
@@ -713,6 +788,7 @@ void retro_run(void) {
             const wc_cart_info_t* ci = wc_host_get_cart_info(host);
             cart_w = ci->width;
             cart_h = ci->height;
+            if (sw_video) announce_cart_size(cart_w, cart_h);
         }
     }
 
@@ -918,7 +994,13 @@ void retro_run(void) {
     }
 
     // 5. Present video — unified GL path for all carts
-    if (hw_render.get_current_framebuffer) {
+    if (sw_video) {
+        // The cart's ARGB8888 framebuffer is XRGB8888 to libretro as it is.
+        uint32_t fb_w, fb_h;
+        const uint8_t* fb = wc_host_get_framebuffer(host, &fb_w, &fb_h);
+        if (fb && fb_w > 0 && fb_h > 0) video_cb(fb, fb_w, fb_h, (size_t)fb_w * 4);
+        else video_cb(NULL, cart_w, cart_h, 0);
+    } else if (hw_render.get_current_framebuffer) {
         uintptr_t ra_fbo = hw_render.get_current_framebuffer();
 
         // For 2D carts: upload framebuffer pixels to redirect FBO as texture
