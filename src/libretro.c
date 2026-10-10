@@ -28,6 +28,74 @@ static retro_log_printf_t log_cb;
 // ─── Core state ─────────────────────────────────────────────────────────────
 
 static wc_host_t* host = NULL;
+
+// ─── Input actions → RetroArch input descriptors ─────────────────────────────
+// A cart that declares input actions (wasmcart SPEC.md, "Input actions") gets
+// them named in the frontend's remap screen: "Pedal" instead of "B". Origins
+// stay "unknown" (-1) to the cart: RetroArch does not tell a core which
+// physical input a RetroPad button is on, and the host never guesses.
+#define WC_LR_MAX_ACTIONS 64
+static wc_host_action_t lr_actions[WC_LR_MAX_ACTIONS];
+static struct retro_input_descriptor lr_desc[WC_LR_MAX_ACTIONS * 4 * 4 + 1];
+static int lr_action_count = -1;
+static unsigned lr_frames = 0;
+
+// wasmcart input id -> RetroPad (device, index, id); the button mapping is
+// the inverse of the one the pads are read with (south = RetroPad B).
+static int lr_map_input(int input, unsigned out[4][3]) {
+    static const unsigned btn[14] = {
+        RETRO_DEVICE_ID_JOYPAD_B, RETRO_DEVICE_ID_JOYPAD_A, RETRO_DEVICE_ID_JOYPAD_Y, RETRO_DEVICE_ID_JOYPAD_X,
+        RETRO_DEVICE_ID_JOYPAD_L, RETRO_DEVICE_ID_JOYPAD_R, RETRO_DEVICE_ID_JOYPAD_START, RETRO_DEVICE_ID_JOYPAD_SELECT,
+        RETRO_DEVICE_ID_JOYPAD_UP, RETRO_DEVICE_ID_JOYPAD_DOWN, RETRO_DEVICE_ID_JOYPAD_LEFT, RETRO_DEVICE_ID_JOYPAD_RIGHT,
+        RETRO_DEVICE_ID_JOYPAD_L3, RETRO_DEVICE_ID_JOYPAD_R3,
+    };
+    if (input >= 0 && input < 14) { out[0][0] = RETRO_DEVICE_JOYPAD; out[0][1] = 0; out[0][2] = btn[input]; return 1; }
+    if (input == 32 || input == 33) {
+        unsigned idx = input == 32 ? RETRO_DEVICE_INDEX_ANALOG_LEFT : RETRO_DEVICE_INDEX_ANALOG_RIGHT;
+        out[0][0] = out[1][0] = RETRO_DEVICE_ANALOG; out[0][1] = out[1][1] = idx;
+        out[0][2] = RETRO_DEVICE_ID_ANALOG_X; out[1][2] = RETRO_DEVICE_ID_ANALOG_Y;
+        return 2;
+    }
+    if (input == 34 || input == 35) {
+        out[0][0] = RETRO_DEVICE_JOYPAD; out[0][1] = 0;
+        out[0][2] = input == 34 ? RETRO_DEVICE_ID_JOYPAD_L2 : RETRO_DEVICE_ID_JOYPAD_R2;
+        return 1;
+    }
+    if (input == 36) {
+        static const unsigned d[4] = { RETRO_DEVICE_ID_JOYPAD_UP, RETRO_DEVICE_ID_JOYPAD_DOWN,
+                                       RETRO_DEVICE_ID_JOYPAD_LEFT, RETRO_DEVICE_ID_JOYPAD_RIGHT };
+        for (int i = 0; i < 4; i++) { out[i][0] = RETRO_DEVICE_JOYPAD; out[i][1] = 0; out[i][2] = d[i]; }
+        return 4;
+    }
+    return 0;
+}
+
+// Actions are declared in wc_init or later, so this is checked on the first
+// frame and then once a second; descriptors are re-sent only on a change.
+static void lr_update_input_descriptors(void) {
+    if (!host || !environ_cb) return;
+    if (lr_frames++ % 60) return;
+    int n = wc_host_actions(host, 0, NULL, 0);
+    if (n == lr_action_count || n <= 0) return;
+    if (n > WC_LR_MAX_ACTIONS) n = WC_LR_MAX_ACTIONS;
+    lr_action_count = n;
+    wc_host_actions(host, 0, lr_actions, n);
+    size_t k = 0;
+    for (unsigned port = 0; port < 4; port++) {
+        for (int a = 0; a < n; a++) {
+            unsigned m[4][3];
+            int c = lr_map_input(lr_actions[a].default_input, m);
+            for (int i = 0; i < c; i++) {
+                lr_desc[k].port = port; lr_desc[k].device = m[i][0];
+                lr_desc[k].index = m[i][1]; lr_desc[k].id = m[i][2];
+                lr_desc[k].description = lr_actions[a].name;
+                k++;
+            }
+        }
+    }
+    memset(&lr_desc[k], 0, sizeof lr_desc[k]);
+    if (k) environ_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, lr_desc);
+}
 static bool uses_gl = false;
 static bool gl_context_ready = false;
 static bool first_frame = true;
@@ -458,6 +526,8 @@ void retro_deinit(void) {
 // ─── Load game ──────────────────────────────────────────────────────────────
 
 bool retro_load_game(const struct retro_game_info* game) {
+    lr_action_count = -1;   // input descriptors are re-sent for the new cart
+    lr_frames = 0;
     if (!host || !game || !game->path) return false;
 
     // Set up file logging next to the cart (Android: logcat buffer too small)
@@ -771,6 +841,7 @@ void retro_run(void) {
         wc_gl_rebind_redirect();
     }
     wc_host_run_frame(host);
+    lr_update_input_descriptors();
 
     if (wc_host_has_trapped(host)) {
         if (log_cb) log_cb(RETRO_LOG_ERROR, "wasmcart: cart trapped\n");
