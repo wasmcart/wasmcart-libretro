@@ -886,6 +886,9 @@ bool retro_unserialize(const void* data, size_t size) {
     void* mem = wc_host_get_memory(host, &mem_size);
     if (!mem || size < mem_size) return false;
     memcpy(mem, data, mem_size);
+    // JIT slots are never carried across a restore: unlink them all and change
+    // the restore generation (wc_jit_config key 7) before the cart runs again.
+    wc_host_jit_unlink_all(host);
     return true;
 }
 
