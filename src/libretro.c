@@ -32,8 +32,8 @@ static wc_host_t* host = NULL;
 // ─── Input actions → RetroArch input descriptors ─────────────────────────────
 // A cart that declares input actions (wasmcart SPEC.md, "Input actions") gets
 // them named in the frontend's remap screen: "Pedal" instead of "B". Origins
-// stay "unknown" (-1) to the cart: RetroArch does not tell a core which
-// physical input a RetroPad button is on, and the host never guesses.
+// are the RetroPad position on the generic pad (see lr_update_input_devices):
+// RetroArch does not tell a core which physical input a RetroPad button is on.
 #define WC_LR_MAX_ACTIONS 64
 static wc_host_action_t lr_actions[WC_LR_MAX_ACTIONS];
 static struct retro_input_descriptor lr_desc[WC_LR_MAX_ACTIONS * 4 * 4 + 1];
