@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <math.h>
 #include <time.h>
 #include <GLES3/gl3.h>
@@ -293,6 +294,7 @@ static uint32_t pref_width = 1920;
 static uint32_t pref_height = 1080;
 static bool jit_disabled = false;
 static bool wgpu_disabled = false;
+static bool perf_log_on = false;
 
 static const struct retro_core_option_v2_definition option_defs[] = {
     {
@@ -346,6 +348,22 @@ static const struct retro_core_option_v2_definition option_defs[] = {
         },
         "auto"
     },
+    {
+        "wasmcart_perf_log",
+        "Performance Log",
+        NULL,
+        "Once a second, writes the frame rate and where each frame's time went (the cart's code, its GL calls, "
+        "the frontend between frames, garbage collection, background threads) to RetroArch's log and to "
+        "wasmcart-perf.log in the save directory; in the first 30 seconds also every frame over 50 ms. "
+        "For reporting slow games. Applies when content is loaded.",
+        NULL, "system",
+        {
+            { "disabled", "Disabled" },
+            { "enabled",  "Enabled" },
+            { NULL, NULL },
+        },
+        "disabled"
+    },
     { NULL, NULL, NULL, NULL, NULL, NULL, {{0}}, NULL },
 };
 
@@ -369,6 +387,10 @@ static void check_options(void) {
     struct retro_variable api = { "wasmcart_gpu_api", NULL };
     wgpu_disabled = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &api) && api.value &&
                     strcmp(api.value, "gl") == 0;
+    struct retro_variable pl = { "wasmcart_perf_log", NULL };
+    perf_log_on = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &pl) && pl.value && strcmp(pl.value, "enabled") == 0;
+    const char* env = getenv("WASMCART_PERF_LOG");
+    if (env && *env && *env != '0') perf_log_on = true;
 }
 
 // Tell the player on screen, where they are looking, and the log.
@@ -896,7 +918,22 @@ static void present_wgpu_frame(void) {
 
 // ─── Run frame ──────────────────────────────────────────────────────────────
 
+static void run_frame(double* delta_out);
+static void perf_frame(double t_enter, double t_exit, double delta_ms);
+static double perf_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec * 1e-6;
+}
+
 void retro_run(void) {
+    if (!perf_log_on) { run_frame(NULL); return; }
+    double delta = 0, t0 = perf_now_ms();
+    run_frame(&delta);
+    perf_frame(t0, perf_now_ms(), delta);
+}
+
+static void run_frame(double* delta_out) {
     if (!host) return;
     if (gl_refused) {
         // The cart never starts. Clear the frontend's framebuffer (ES 2.0
@@ -1067,6 +1104,7 @@ void retro_run(void) {
         ? (frame_time_ms < FIXED_STEP * 4.0 ? frame_time_ms : FIXED_STEP * 4.0)
         : FIXED_STEP;
     time_ms += delta_ms;
+    if (delta_out) *delta_out = delta_ms;
     wc_host_set_time(host, time_ms, delta_ms, frame_count);
     frame_count++;
 
@@ -1322,4 +1360,109 @@ void retro_set_controller_port_device(unsigned port, unsigned device) {
 void retro_cheat_reset(void) {}
 void retro_cheat_set(unsigned index, bool enabled, const char* code) {
     (void)index; (void)enabled; (void)code;
+}
+
+// ─── Performance log (core option wasmcart_perf_log) ────────────────────────
+// One line a second: fps; the mean and worst time inside retro_run, split
+// into the cart's code (wasm, V8, the host's import glue) and its GL calls
+// (the driver); the time between retro_run calls (the frontend: present,
+// swap, vsync wait); the dt handed to the cart (a cart on a fixed step runs
+// dt / 16.7 ms ticks in the frame); V8 garbage collection and heap; CPU used
+// by the core's other threads (V8's background compiler, the driver's
+// threads, audio) next to the main thread's. In the first 30 s every frame
+// over 50 ms gets a line of its own.
+static FILE* perf_file = NULL;
+static bool perf_file_tried = false;
+static double perf_t_start = 0, perf_sec_t0 = 0, perf_prev_exit = 0;
+static struct {
+    unsigned frames;
+    double run_sum, run_max, gl_sum, gap_sum, gap_max, dt_sum, dt_max, gc_ms, slowest_gl_ms;
+    unsigned gl_calls, gc_count;
+    const char* slowest_gl;
+    double cpu_main0, cpu_all0;
+} PS;
+/* CPU time of the calling thread (1) or the whole process (0); 0 where the clocks are missing */
+static double cpu_ms(int thread) {
+#if defined(CLOCK_THREAD_CPUTIME_ID) && defined(CLOCK_PROCESS_CPUTIME_ID)
+    struct timespec ts;
+    if (clock_gettime(thread ? CLOCK_THREAD_CPUTIME_ID : CLOCK_PROCESS_CPUTIME_ID, &ts) != 0) return 0;
+    return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec * 1e-6;
+#else
+    (void)thread;
+    return 0;
+#endif
+}
+static void perf_line(const char* fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (log_cb) log_cb(RETRO_LOG_INFO, "%s\n", buf);
+    if (!perf_file_tried) {
+        perf_file_tried = true;
+        const char* dir = NULL;
+        char path[1024];
+        if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &dir) && dir && *dir)
+            snprintf(path, sizeof path, "%s/wasmcart-perf.log", dir);
+        else snprintf(path, sizeof path, "wasmcart-perf.log");
+        perf_file = fopen(path, "a");
+        if (log_cb) log_cb(RETRO_LOG_INFO, "wasmcart perf: writing %s%s\n", path, perf_file ? "" : " FAILED");
+        if (perf_file) fprintf(perf_file, "wasmcart perf: new session\n");
+    }
+    if (perf_file) {
+        fprintf(perf_file, "%s\n", buf);
+        fflush(perf_file);
+    }
+}
+static void perf_frame(double t_enter, double t_exit, double delta_ms) {
+    static bool started = false;
+    if (!started) {
+        started = true;
+        wc_host_prof_enable(1);
+        wc_host_prof_t z;
+        wc_host_prof_take(&z);
+        perf_t_start = perf_sec_t0 = t_enter;
+        perf_prev_exit = t_enter;
+        PS.cpu_main0 = cpu_ms(1);
+        PS.cpu_all0 = cpu_ms(0);
+        perf_line("wasmcart perf: log on (t = seconds since the first frame; ms per frame: run = inside retro_run, "
+                  "gl = the cart's GL calls, code = run - gl (wasm, V8, host glue), gap = between retro_run calls, "
+                  "dt = the time handed to the cart, ticks = dt / 16.7 ms; bg = CPU ms per second of the core's other threads)");
+    }
+    wc_host_prof_t pr;
+    wc_host_prof_take(&pr);
+    double run = t_exit - t_enter, gap = t_enter - perf_prev_exit;
+    perf_prev_exit = t_exit;
+    PS.frames++;
+    PS.run_sum += run;
+    if (run > PS.run_max) PS.run_max = run;
+    PS.gl_sum += pr.gl_ms;
+    PS.gl_calls += pr.gl_calls;
+    if (pr.gl_max_ms > PS.slowest_gl_ms) { PS.slowest_gl_ms = pr.gl_max_ms; PS.slowest_gl = pr.gl_max_name; }
+    PS.gap_sum += gap;
+    if (gap > PS.gap_max) PS.gap_max = gap;
+    PS.dt_sum += delta_ms;
+    if (delta_ms > PS.dt_max) PS.dt_max = delta_ms;
+    PS.gc_ms += pr.gc_ms;
+    PS.gc_count += pr.gc_count;
+    double t = (t_enter - perf_t_start) / 1000.0;
+    if (t < 30 && run + gap > 50)
+        perf_line("wasmcart perf: slow frame t=%.2f frame %u: run %.1f (gl %.1f in %u calls, slowest %s %.1f) gap %.1f dt %.1f gc %.1f (%u)",
+                  t, frame_count, run, pr.gl_ms, pr.gl_calls, pr.gl_max_name ? pr.gl_max_name : "-", pr.gl_max_ms, gap, delta_ms,
+                  pr.gc_ms, pr.gc_count);
+    if (t_exit - perf_sec_t0 >= 1000.0) {
+        double secs = (t_exit - perf_sec_t0) / 1000.0, n = PS.frames ? PS.frames : 1;
+        double cm = cpu_ms(1), ca = cpu_ms(0);
+        double main_cpu = cm - PS.cpu_main0, bg_cpu = (ca - PS.cpu_all0) - main_cpu;
+        perf_line("wasmcart perf: t=%.0f fps %.1f | run %.1f max %.1f | code %.1f gl %.1f (%.0f calls, slowest %s %.1f) | "
+                  "gap %.1f max %.1f | dt %.1f max %.1f ticks %.2f | gc %.1f ms (%u) heap %.1f MB | cpu main %.0f bg %.0f ms/s",
+                  t, PS.frames / secs, PS.run_sum / n, PS.run_max, (PS.run_sum - PS.gl_sum) / n, PS.gl_sum / n, PS.gl_calls / n,
+                  PS.slowest_gl ? PS.slowest_gl : "-", PS.slowest_gl_ms, PS.gap_sum / n, PS.gap_max, PS.dt_sum / n, PS.dt_max,
+                  PS.dt_sum / n / (1000.0 / 60.0), PS.gc_ms, PS.gc_count, pr.heap_used_mb, main_cpu / secs, bg_cpu / secs);
+        memset(&PS, 0, sizeof PS);
+        PS.cpu_main0 = cm;
+        PS.cpu_all0 = ca;
+        perf_sec_t0 = t_exit;
+    }
 }
