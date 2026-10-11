@@ -28,6 +28,25 @@ static retro_log_printf_t log_cb;
 // ─── Core state ─────────────────────────────────────────────────────────────
 
 static wc_host_t* host = NULL;
+// The cart file, kept for retro_reset (Restart Content loads it again).
+static char game_path[4096];
+// SAVE_RAM as the frontend sees it: a buffer of the core's, stable for the
+// whole session. The cart's save region moves when retro_reset starts a new
+// instance, and RetroArch keeps the pointer it got at load (autosave, the
+// .srm written at unload). The frontend's .srm goes in before the cart's
+// wc_init; the cart's region is copied back after every frame and restore.
+static uint8_t* sram = NULL;
+static uint32_t sram_size = 0;
+static void sram_to_cart(void) {
+    uint32_t n = 0;
+    uint8_t* p = host ? wc_host_get_save_data(host, &n) : NULL;
+    if (p && sram && n) memcpy(p, sram, n < sram_size ? n : sram_size);
+}
+static void sram_from_cart(void) {
+    uint32_t n = 0;
+    uint8_t* p = host ? wc_host_get_save_data(host, &n) : NULL;
+    if (p && sram && n) memcpy(sram, p, n < sram_size ? n : sram_size);
+}
 
 // ─── Input actions → RetroArch input descriptors ─────────────────────────────
 // A cart that declares input actions (wasmcart SPEC.md, "Input actions") gets
@@ -133,6 +152,9 @@ static uint32_t cart_w = 0, cart_h = 0;
 static uint32_t max_w = 0, max_h = 0;
 // on_context_reset learned the cart's real size; apply it on the next retro_run.
 static bool geometry_pending = false;
+// retro_reset found a cart larger than video was set up for: SET_SYSTEM_AV_INFO
+// on the next retro_run (the environment call belongs in retro_run).
+static bool in_reset = false, av_info_pending = false;
 static uint32_t frame_count = 0;
 static double time_ms = 0;
 
@@ -276,7 +298,7 @@ static const struct retro_core_option_v2_definition option_defs[] = {
         NULL,
         "The frame size the cart is asked to render (the host's preferred size). A cart that follows it "
         "renders the largest frame of its own aspect that fits (a 16:9 game at 640x480 renders 640x360, shown at 16:9); "
-        "a cart may also choose its own size. Lower is faster on a slow GPU. Applies when content is loaded.",
+        "a cart may also choose its own size. Lower is faster on a slow GPU. Applies when content is loaded or restarted (Restart Content).",
         NULL, "video",
         {
             { "480x270",   "480x270 (270p)" },
@@ -451,7 +473,7 @@ void retro_set_environment(retro_environment_t cb) {
 void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "wasmcart";
-    info->library_version = "0.7.2";
+    info->library_version = "0.7.3";
     info->valid_extensions = "wasc|wasm";
     info->need_fullpath = true;   // we read the file ourselves (ZIP)
     info->block_extract = true;   // don't extract, we handle ZIP
@@ -495,6 +517,11 @@ static void announce_cart_size(uint32_t w, uint32_t h) {
         wc_log("wasmcart: geometry %ux%u (within max %ux%u, SET_GEOMETRY on next frame)\n", w, h, max_w, max_h);
         return;
     }
+    if (in_reset) {
+        av_info_pending = true;
+        wc_log("wasmcart: reset: %ux%u exceeds the declared max %ux%u, SET_SYSTEM_AV_INFO on next frame\n", w, h, max_w, max_h);
+        return;
+    }
     struct retro_system_av_info av = {0};
     av.geometry.base_width = w;
     av.geometry.base_height = h;
@@ -508,6 +535,68 @@ static void announce_cart_size(uint32_t w, uint32_t h) {
     max_h = h;
     environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
     wc_log("wasmcart: SET_SYSTEM_AV_INFO %ux%u (exceeded declared max)\n", w, h);
+}
+
+// GL is available: finish the cart's deferred init (wc_init), size the
+// redirect target to what it settled on and tell the frontend.
+static void finish_cart_init(void) {
+    if (!host) return;
+
+    // RetroArch is the host: give wasmcart its GL via the frontend's
+    // get_proc_address (the common libretro GL context — GLES3 on Android /
+    // handhelds, whatever the desktop frontend provides). The shared GL layer
+    // loads its entry points from this, so the core links NO GL library of
+    // its own (no ANGLE, single self-contained file).
+    wc_host_set_gl_loader(host, (wc_gl_get_proc_fn)hw_render.get_proc_address);
+
+    // Create redirect FBO with depth+stencil BEFORE cart init.
+    // Three.js needs depth testing, Ganesh needs stencil.
+    // RetroArch's hw_render FBO may not have these attachments.
+    extern void wc_gl_setup_redirect(uint32_t w, uint32_t h);
+    wc_gl_setup_redirect(pref_width, pref_height);
+
+    sram_to_cart();  // the frontend's .srm (copied in after load) before wc_init
+    wc_host_finish_init(host);
+    sram_from_cart();
+
+    // Re-read dimensions (may have changed after init)
+    const wc_cart_info_t* ci = wc_host_get_cart_info(host);
+    cart_w = ci->width;
+    cart_h = ci->height;
+
+    // Sizing differs by cart TYPE, and taking max() for both was wrong.
+    //
+    // A GL cart renders into whatever drawable it is handed, so it should
+    // get the larger of its own request and the frontend preference --
+    // undersizing crops it.
+    //
+    // A 2D cart is the opposite: it draws into a fixed cart_w x cart_h
+    // framebuffer that we upload as a texture. Sizing the target to the
+    // preference does NOT scale it up; it leaves the cart's pixels in the
+    // bottom-left corner of a mostly-empty buffer. The 64x64 rumble
+    // fixture landed in 0.1% of a 1920x1080 target -- a black screen with a
+    // speck in the corner. Give a 2D cart exactly its own size and let
+    // RetroArch scale it to the window, which is what frontends are for.
+    // The target must match what the cart ACTUALLY renders, for both cart
+    // types. Taking max() with the frontend preference was wrong: it does
+    // not scale the cart up, it leaves the cart's output in the bottom-left
+    // corner of a larger, mostly-empty frame.
+    //
+    // Measured: hello_canvas declares 800x600 and its Ganesh blit really is
+    // 800x600, but the FBO was sized 1920x1080 -- so 75% of the screen was
+    // empty and the image sat in the corner. The 64x64 rumble fixture was
+    // the same bug at an extreme, showing as an all-black screen.
+    //
+    // pref_width/height still reach the cart through wc_host_options_t as a
+    // PREFERENCE before init; a cart free to honour it comes back already
+    // resized, and cart_w/h then equals the preference anyway. What a cart
+    // reports after init is the authority, so use it verbatim and let
+    // RetroArch scale to the window -- that is what a frontend is for.
+    wc_gl_setup_redirect(cart_w, cart_h);
+    announce_cart_size(cart_w, cart_h);
+
+    // Save cart's initial GL state so restore works on first frame
+    save_cart_gl_state();
 }
 
 static void on_context_reset(void) {
@@ -539,61 +628,7 @@ static void on_context_reset(void) {
     }
 
     // Now GL is available — finish deferred init
-    if (host) {
-        // RetroArch is the host: give wasmcart its GL via the frontend's
-        // get_proc_address (the common libretro GL context — GLES3 on Android /
-        // handhelds, whatever the desktop frontend provides). The shared GL layer
-        // loads its entry points from this, so the core links NO GL library of
-        // its own (no ANGLE, single self-contained file).
-        wc_host_set_gl_loader(host, (wc_gl_get_proc_fn)hw_render.get_proc_address);
-
-        // Create redirect FBO with depth+stencil BEFORE cart init.
-        // Three.js needs depth testing, Ganesh needs stencil.
-        // RetroArch's hw_render FBO may not have these attachments.
-        extern void wc_gl_setup_redirect(uint32_t w, uint32_t h);
-        wc_gl_setup_redirect(pref_width, pref_height);
-
-        wc_host_finish_init(host);
-
-        // Re-read dimensions (may have changed after init)
-        const wc_cart_info_t* ci = wc_host_get_cart_info(host);
-        cart_w = ci->width;
-        cart_h = ci->height;
-
-        // Sizing differs by cart TYPE, and taking max() for both was wrong.
-        //
-        // A GL cart renders into whatever drawable it is handed, so it should
-        // get the larger of its own request and the frontend preference --
-        // undersizing crops it.
-        //
-        // A 2D cart is the opposite: it draws into a fixed cart_w x cart_h
-        // framebuffer that we upload as a texture. Sizing the target to the
-        // preference does NOT scale it up; it leaves the cart's pixels in the
-        // bottom-left corner of a mostly-empty buffer. The 64x64 rumble
-        // fixture landed in 0.1% of a 1920x1080 target -- a black screen with a
-        // speck in the corner. Give a 2D cart exactly its own size and let
-        // RetroArch scale it to the window, which is what frontends are for.
-        // The target must match what the cart ACTUALLY renders, for both cart
-        // types. Taking max() with the frontend preference was wrong: it does
-        // not scale the cart up, it leaves the cart's output in the bottom-left
-        // corner of a larger, mostly-empty frame.
-        //
-        // Measured: hello_canvas declares 800x600 and its Ganesh blit really is
-        // 800x600, but the FBO was sized 1920x1080 -- so 75% of the screen was
-        // empty and the image sat in the corner. The 64x64 rumble fixture was
-        // the same bug at an extreme, showing as an all-black screen.
-        //
-        // pref_width/height still reach the cart through wc_host_options_t as a
-        // PREFERENCE before init; a cart free to honour it comes back already
-        // resized, and cart_w/h then equals the preference anyway. What a cart
-        // reports after init is the authority, so use it verbatim and let
-        // RetroArch scale to the window -- that is what a frontend is for.
-        wc_gl_setup_redirect(cart_w, cart_h);
-        announce_cart_size(cart_w, cart_h);
-
-        // Save cart's initial GL state so restore works on first frame
-        save_cart_gl_state();
-    }
+    finish_cart_init();
 }
 
 static void on_context_destroy(void) {
@@ -602,16 +637,11 @@ static void on_context_destroy(void) {
 
 // ─── Init / Deinit ──────────────────────────────────────────────────────────
 
-void retro_init(void) {
+// A host with the frontend's rumble behind it (retro_init; retro_reset makes a fresh one).
+static void create_host(void) {
     host = wc_host_create();
     if (!host && log_cb)
         log_cb(RETRO_LOG_ERROR, "wasmcart: failed to create host\n");
-
-    // Rumble is optional: a frontend without it simply says no, and the cart's
-    // wc_pad_has_rumble then reports 0 rather than the cart failing to load.
-    rumble_available = environ_cb &&
-        environ_cb(RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE, &rumble_iface);
-    memset(rumble_frames_left, 0, sizeof(rumble_frames_left));
     if (host && rumble_available) {
         wc_rumble_backend_t backend = {
             .has_rumble = lr_has_rumble,
@@ -621,6 +651,16 @@ void retro_init(void) {
         };
         wc_host_set_rumble_backend(host, &backend);
     }
+}
+
+void retro_init(void) {
+
+    // Rumble is optional: a frontend without it simply says no, and the cart's
+    // wc_pad_has_rumble then reports 0 rather than the cart failing to load.
+    rumble_available = environ_cb &&
+        environ_cb(RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE, &rumble_iface);
+    memset(rumble_frames_left, 0, sizeof(rumble_frames_left));
+    create_host();
     if (log_cb)
         log_cb(RETRO_LOG_INFO, "wasmcart: rumble %s\n",
                rumble_available ? "available" : "not supported by frontend");
@@ -633,10 +673,56 @@ void retro_deinit(void) {
     host = NULL;
     free(audio_conv_buf);
     audio_conv_buf = NULL;
+    free(sram);
+    sram = NULL;
+    sram_size = 0;
     audio_conv_cap = 0;
 }
 
 // ─── Load game ──────────────────────────────────────────────────────────────
+
+// Load game_path into the host with the current core options; wc_init waits
+// for the GL context (context_reset, or the first frame). SAVE_RAM is the
+// core's buffer: the cart gets its bytes before wc_init.
+static bool load_cart(void) {
+    // For GL carts, defer _initialize/wc_init until GL context is ready
+    wc_host_options_t opts = {0};
+    opts.host_fps = 60;
+    opts.audio_sample_rate = 48000;
+    check_options();
+    opts.preferred_width = pref_width;
+    opts.preferred_height = pref_height;
+    opts.jit_disabled = jit_disabled;
+    jit_notice_shown = false;
+    opts.defer_init = true;  // always defer — we'll finish in context_reset or first frame
+    opts.save_data = sram;
+    opts.save_data_size = sram ? sram_size : 0;
+
+    int rc = wc_host_load_file(host, game_path, &opts);
+    if (rc != 0) {
+        if (log_cb) log_cb(RETRO_LOG_ERROR, "wasmcart: failed to load %s\n", game_path);
+        return false;
+    }
+
+    // Hold V8 locker persistently — RetroArch calls retro_run from the same thread
+    wc_host_enter_v8();
+
+    const wc_cart_info_t* info = wc_host_get_cart_info(host);
+    cart_w = info->width;
+    cart_h = info->height;
+    uses_gl = wc_host_uses_gl(host);
+
+    // The save region is known at load (wc_get_info ran): the frontend's
+    // buffer has its size, and the cart's bytes until the frontend's .srm lands.
+    uint32_t n = 0;
+    uint8_t* region = wc_host_get_save_data(host, &n);
+    if (!sram && n) {
+        sram = (uint8_t*)calloc(1, n);
+        sram_size = sram ? n : 0;
+        if (sram && region) memcpy(sram, region, n);
+    }
+    return true;
+}
 
 bool retro_load_game(const struct retro_game_info* game) {
     lr_action_count = -1;   // input descriptors are re-sent for the new cart
@@ -668,31 +754,8 @@ bool retro_load_game(const struct retro_game_info* game) {
     };
     environ_cb(RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK, &frame_time);
 
-    // Load the .wasc
-    // For GL carts, defer _initialize/wc_init until GL context is ready
-    wc_host_options_t opts = {0};
-    opts.host_fps = 60;
-    opts.audio_sample_rate = 48000;
-    check_options();
-    opts.preferred_width = pref_width;
-    opts.preferred_height = pref_height;
-    opts.jit_disabled = jit_disabled;
-    jit_notice_shown = false;
-    opts.defer_init = true;  // always defer — we'll finish in context_reset or first frame
-
-    int rc = wc_host_load_file(host, game->path, &opts);
-    if (rc != 0) {
-        if (log_cb) log_cb(RETRO_LOG_ERROR, "wasmcart: failed to load %s\n", game->path);
-        return false;
-    }
-
-    // Hold V8 locker persistently — RetroArch calls retro_run from the same thread
-    wc_host_enter_v8();
-
-    const wc_cart_info_t* info = wc_host_get_cart_info(host);
-    cart_w = info->width;
-    cart_h = info->height;
-    uses_gl = wc_host_uses_gl(host);
+    snprintf(game_path, sizeof game_path, "%s", game->path);
+    if (!load_cart()) return false;
 
     const wc_manifest_t* manifest = wc_host_get_manifest(host);
     if (log_cb) log_cb(RETRO_LOG_INFO, "wasmcart: loaded %s (%ux%u, %s)\n",
@@ -789,7 +852,9 @@ void retro_run(void) {
     if (first_frame) {
         first_frame = false;
         if (!gl_context_ready) {
+            sram_to_cart();
             wc_host_finish_init(host);
+            sram_from_cart();
             const wc_cart_info_t* ci = wc_host_get_cart_info(host);
             cart_w = ci->width;
             cart_h = ci->height;
@@ -936,6 +1001,10 @@ void retro_run(void) {
     wc_host_set_time(host, time_ms, delta_ms, frame_count);
     frame_count++;
 
+    if (av_info_pending) {
+        av_info_pending = false;
+        announce_cart_size(cart_w, cart_h);
+    }
     // Deferred from on_context_reset: geometry change without a video reinit.
     if (geometry_pending) {
         geometry_pending = false;
@@ -990,6 +1059,7 @@ void retro_run(void) {
     }
     lr_update_input_devices();
     wc_host_run_frame(host);
+    sram_from_cart();
     jit_notice_tick();
     lr_update_input_descriptors();
 
@@ -1113,6 +1183,7 @@ bool retro_unserialize(const void* data, size_t size) {
     void* mem = wc_host_get_memory(host, &mem_size);
     if (!mem || size < mem_size) return false;
     memcpy(mem, data, mem_size);
+    sram_from_cart();
     // JIT slots are never carried across a restore: unlink them all and change
     // the restore generation (wc_jit_config key 7) before the cart runs again.
     wc_host_jit_unlink_all(host);
@@ -1122,22 +1193,53 @@ bool retro_unserialize(const void* data, size_t size) {
 // ─── Persistent save (SRAM) ─────────────────────────────────────────────────
 
 size_t retro_get_memory_size(unsigned id) {
-    if (id != RETRO_MEMORY_SAVE_RAM || !host) return 0;
-    uint32_t size;
-    wc_host_get_save_data(host, &size);
-    return size;
+    return id == RETRO_MEMORY_SAVE_RAM ? sram_size : 0;
 }
 
 void* retro_get_memory_data(unsigned id) {
-    if (id != RETRO_MEMORY_SAVE_RAM || !host) return NULL;
-    uint32_t size;
-    return wc_host_get_save_data(host, &size);
+    return id == RETRO_MEMORY_SAVE_RAM ? sram : NULL;
 }
 
 // ─── Misc required exports ──────────────────────────────────────────────────
 
 unsigned retro_api_version(void) { return RETRO_API_VERSION; }
-void retro_reset(void) { /* TODO: reload cart? */ }
+// Restart Content: a fresh instance of the cart, as a console's reset button
+// restarts its game: the old instance (and the GL objects it left in the
+// frontend's context) goes, the cart is loaded again with the current core
+// options (Internal Resolution among them) and starts from wc_init with the
+// current SAVE_RAM. Its size goes to the frontend: SET_GEOMETRY when it fits
+// what video was set up with, else SET_SYSTEM_AV_INFO.
+void retro_reset(void) {
+    if (!host || !game_path[0] || gl_refused) return;
+    bool init_done = !first_frame || gl_context_ready;
+    if (init_done) sram_from_cart();
+    if (gl_context_ready) {
+        extern void wc_gl_release_cart_objects(void);
+        wc_gl_release_cart_objects();
+    }
+    for (uint32_t i = 0; i < WC_MAX_PADS; i++) lr_rumble_stop(NULL, i);
+    wc_host_exit_v8();
+    wc_host_destroy(host);
+    host = NULL;
+    create_host();
+    if (!host) return;
+    lr_action_count = -1;   // input descriptors are re-sent for the new instance
+    for (int p = 0; p < WC_LR_PORTS; p++) lr_device_sent[p] = -1;
+    lr_frames = 0;
+    frame_count = 0;
+    time_ms = 0;
+    if (!load_cart()) {
+        notify("Restart failed: the cart could not be loaded again.", RETRO_LOG_ERROR, 10000);
+        wc_host_destroy(host);
+        host = NULL;
+        return;
+    }
+    wc_log("wasmcart: reset: cart loaded again (%ux%u requested)\n", pref_width, pref_height);
+    in_reset = true;
+    if (gl_context_ready) finish_cart_init();
+    else first_frame = true;  // 2D cart in software: the first frame finishes it
+    in_reset = false;
+}
 unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }
 
 void retro_set_controller_port_device(unsigned port, unsigned device) {

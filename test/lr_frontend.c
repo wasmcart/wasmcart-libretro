@@ -12,6 +12,7 @@
 //               [--expect-pixel X,Y,RRGGBB]
 //               [--sram-in FILE] [--sram-out FILE]
 //               [--input FILE] [--shot F:FILE.ppm]... [--timing F]
+//               [--set-option F:key=value]... [--reset-at F] [--expect-size WxH]
 //
 // --input plays a RetroPad on port 0 from a script: one line per change,
 // "<frame> <buttons> <lx> <ly> [<rx> <ry>]", buttons a comma list of RetroPad
@@ -21,6 +22,12 @@
 // --shot F:FILE writes the frame the core presented at retro_run F (0-based)
 // as a binary PPM, top row first (hardware frames read back from the
 // frontend's framebuffer). Up to 32.
+// --set-option F:key=value changes a core option before retro_run F (as the
+// player does in the Quick Menu); --reset-at F calls retro_reset before
+// retro_run F (Restart Content). --expect-size: the last frame presented is
+// W x H. SET_GEOMETRY and SET_SYSTEM_AV_INFO are printed; SET_SYSTEM_AV_INFO
+// resizes the frontend's framebuffer to the new maximum, as RetroArch's video
+// reinit does.
 // --timing F times every retro_run from frame F on, each followed by glFinish
 // (the GPU work of the frame counted, as a frontend's swap would wait for it),
 // and prints the mean, median, 95th percentile and worst frame in ms.
@@ -65,6 +72,12 @@
 static const char* opt_key[MAX_OPTIONS];
 static const char* opt_val[MAX_OPTIONS];
 static int opt_count = 0;
+#define MAX_SETS 8
+static long set_frame[MAX_SETS];
+static const char* set_key[MAX_SETS];
+static const char* set_val[MAX_SETS];
+static int set_count = 0;
+static unsigned av_w = 0, av_h = 0;   /* a SET_SYSTEM_AV_INFO not yet applied */
 
 static const char* expect_message = NULL;
 static int got_message = 0;
@@ -137,10 +150,21 @@ static bool env_cb(unsigned cmd, void* data) {
     case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2:
     case RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME:
     case RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK:
-    case RETRO_ENVIRONMENT_SET_GEOMETRY:
-    case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO:
     case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
         return true;
+    case RETRO_ENVIRONMENT_SET_GEOMETRY: {
+        const struct retro_game_geometry* g = data;
+        printf("lr_frontend: SET_GEOMETRY %ux%u (max %ux%u)\n", g->base_width, g->base_height, g->max_width, g->max_height);
+        return true;
+    }
+    case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO: {
+        const struct retro_system_av_info* a = data;
+        printf("lr_frontend: SET_SYSTEM_AV_INFO %ux%u (max %ux%u)\n", a->geometry.base_width, a->geometry.base_height,
+               a->geometry.max_width, a->geometry.max_height);
+        av_w = a->geometry.max_width;
+        av_h = a->geometry.max_height;
+        return true;
+    }
     default:
         return false;
     }
@@ -263,6 +287,14 @@ static void write_shot(const char* path) {
     free(rgb);
 }
 
+static GLuint fe_rb[2];
+/* the frontend's framebuffer at w x h (colour, depth + stencil) */
+static void fe_storage(unsigned w, unsigned h) {
+    glBindRenderbuffer(GL_RENDERBUFFER, fe_rb[0]);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, w, h);
+    glBindRenderbuffer(GL_RENDERBUFFER, fe_rb[1]);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+}
 static int egl_setup(unsigned w, unsigned h) {
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_display =
         (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
@@ -282,15 +314,12 @@ static int egl_setup(unsigned w, unsigned h) {
     // The frontend's framebuffer: what RetroArch's hw_render FBO is. Built
     // with what ES 2.0 has (OES_rgb8_rgba8, OES_packed_depth_stencil: same
     // enum values as the ES3 ones), depth and stencil attached separately.
-    GLuint rb[2];
+    GLuint* rb = fe_rb;
     glGenFramebuffers(1, &fbo);
     glGenRenderbuffers(2, rb);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glBindRenderbuffer(GL_RENDERBUFFER, rb[0]);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, w, h);
+    fe_storage(w, h);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb[0]);
-    glBindRenderbuffer(GL_RENDERBUFFER, rb[1]);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
     glClearColor(0, 0, 0, 1);
@@ -306,7 +335,8 @@ int main(int argc, char** argv) {
                         "[--option key=value]... [--expect-message TEXT]\n", argv[0]);
         return 2;
     }
-    long frames = 300, save_at = -1, restore_at = -1, timing_from = -1;
+    long frames = 300, save_at = -1, restore_at = -1, timing_from = -1, reset_at = -1;
+    unsigned want_w = 0, want_h = 0;
     const char* state_out = NULL;
     const char* state_in = NULL;
     long unplug_at = -1;
@@ -326,6 +356,17 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--sram-out")) sram_out = argv[i + 1];
         else if (!strcmp(argv[i], "--expect-video")) expect_video = argv[i + 1];
         else if (!strcmp(argv[i], "--timing")) timing_from = atol(argv[i + 1]);
+        else if (!strcmp(argv[i], "--reset-at")) reset_at = atol(argv[i + 1]);
+        else if (!strcmp(argv[i], "--expect-size")) { if (sscanf(argv[i + 1], "%ux%u", &want_w, &want_h) != 2) return 2; }
+        else if (!strcmp(argv[i], "--set-option") && set_count < MAX_SETS) {
+            char* colon = strchr(argv[i + 1], ':');
+            char* eq = colon ? strchr(colon, '=') : NULL;
+            if (!colon || !eq) return 2;
+            set_frame[set_count] = atol(argv[i + 1]);
+            *eq = 0;
+            set_key[set_count] = colon + 1;
+            set_val[set_count++] = eq + 1;
+        }
         else if (!strcmp(argv[i], "--input")) {
             if (!load_input(argv[i + 1])) { fprintf(stderr, "lr_frontend: cannot read %s\n", argv[i + 1]); return 2; }
         }
@@ -367,13 +408,14 @@ int main(int argc, char** argv) {
     bool (*retro_serialize)(void*, size_t);
     bool (*retro_unserialize)(const void*, size_t);
     void (*retro_unload_game)(void);
+    void (*retro_reset)(void);
     void (*retro_set_controller_port_device)(unsigned, unsigned);
     size_t (*retro_get_memory_size)(unsigned);
     void* (*retro_get_memory_data)(unsigned);
     SYM(retro_set_environment); SYM(retro_set_video_refresh); SYM(retro_set_audio_sample);
     SYM(retro_set_audio_sample_batch); SYM(retro_set_input_poll); SYM(retro_set_input_state);
     SYM(retro_init); SYM(retro_load_game); SYM(retro_get_system_av_info); SYM(retro_run);
-    SYM(retro_serialize_size); SYM(retro_serialize); SYM(retro_unserialize); SYM(retro_unload_game);
+    SYM(retro_serialize_size); SYM(retro_serialize); SYM(retro_unserialize); SYM(retro_unload_game); SYM(retro_reset);
     SYM(retro_set_controller_port_device); SYM(retro_get_memory_size); SYM(retro_get_memory_data);
 
     retro_set_environment(env_cb);
@@ -444,10 +486,26 @@ int main(int argc, char** argv) {
             retro_set_controller_port_device(0, RETRO_DEVICE_NONE);
             printf("lr_frontend: frame %ld port 0 unplugged\n", f);
         }
+        for (int k = 0; k < set_count; k++) {
+            if (set_frame[k] != f) continue;
+            int o = 0;
+            while (o < opt_count && strcmp(opt_key[o], set_key[k])) o++;
+            if (o == opt_count && opt_count < MAX_OPTIONS) opt_key[opt_count++] = set_key[k];
+            if (o < MAX_OPTIONS) opt_val[o] = set_val[k];
+            printf("lr_frontend: frame %ld option %s=%s\n", f, set_key[k], set_val[k]);
+        }
+        if (f == reset_at) {
+            printf("lr_frontend: frame %ld reset\n", f);
+            retro_reset();
+        }
         cur_frame = f;
         struct timespec t0, t1;
         if (timing_from >= 0 && f >= timing_from) clock_gettime(CLOCK_MONOTONIC, &t0);
         retro_run();
+        if (av_w && av_h) { /* RetroArch's video reinit: the framebuffer at the new maximum */
+            fe_storage(av_w, av_h);
+            av_w = av_h = 0;
+        }
         if (timing_from >= 0 && f >= timing_from) {
             glFinish();
             clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -514,6 +572,11 @@ int main(int argc, char** argv) {
             fflush(stdout);
             _exit(1);
         }
+    }
+    if (want_w && (last_w != want_w || last_h != want_h)) {
+        printf("lr_frontend: FAIL: the last frame is %ux%u, not %ux%u\n", last_w, last_h, want_w, want_h);
+        fflush(stdout);
+        _exit(1);
     }
     if (expect_message && !got_message) {
         printf("lr_frontend: FAIL: no on-screen message containing \"%s\"\n", expect_message);

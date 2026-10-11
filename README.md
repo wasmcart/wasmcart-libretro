@@ -112,7 +112,7 @@ Engines that can build both backends into one cart are the way to ship one
 
 ## Core Options
 
-- **Internal Resolution**: 270p, 360p, 640x480, 540p, 720p, 1080p, 1440p, 4K — passed to the cart as its preferred resolution (`wc_host_info_t`); a cart that follows it (cartwheel games do) renders the largest frame of its own aspect that fits, and RetroArch shows it at that aspect. Applies when content is loaded (Restart Content after changing it)
+- **Internal Resolution**: 270p, 360p, 640x480, 540p, 720p, 1080p, 1440p, 4K — passed to the cart as its preferred resolution (`wc_host_info_t`); a cart that follows it (cartwheel games do) renders the largest frame of its own aspect that fits, and RetroArch shows it at that aspect. Applies when content loads or restarts (Quick Menu → Restart Content)
 - **Runtime Code Generation**: Enabled (default) / Disabled, applied when content loads (`WASMCART_JIT=0` in the environment also turns it off). A cart that asks for it while it is off runs without it, and the core shows an on-screen notice on its first request saying so.
 
 ## Tests (Linux)
@@ -122,7 +122,7 @@ cmake -B build -DWASMCART_LIBRETRO_TESTS=ON && cmake --build build
 test/run-tests.sh build <wasmcart-lua cart.wasc> <JIT engine cart.wasc>
 ```
 
-`test/lr_frontend` is a headless libretro frontend (Mesa surfaceless EGL). The script restores a save state mid-run, carries a JIT cart's state across a restore and across sessions, checks the JIT-off notice, and carries a save (SAVE_RAM) across sessions in RetroArch's order (the .srm copied in after retro_load_game, before context_reset and the first retro_run).
+`test/lr_frontend` is a headless libretro frontend (Mesa surfaceless EGL). The script restores a save state mid-run, carries a JIT cart's state across a restore and across sessions, checks the JIT-off notice, and carries a save (SAVE_RAM) across sessions in RetroArch's order (the .srm copied in after retro_load_game, before context_reset and the first retro_run), and restarts a cart (Restart Content: a changed Internal Resolution applies, the save carries over).
 
 ## Build Targets
 

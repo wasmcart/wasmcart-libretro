@@ -30,6 +30,15 @@
 #    save region was size 0 then, so nothing loaded and every start was a
 #    fresh game). The save cart (wasmcart-native's fixture) counts its runs
 #    in the save region and shows the count wc_init read: red 0, green 1.
+# 7. Restart Content (retro_reset) starts a fresh instance of the cart with
+#    the current core options and the current SAVE_RAM: the rescart fixture
+#    (test/rescart.c, built here with wasi-sdk) renders at the preferred size
+#    and counts its runs in its save region. A smaller Internal Resolution
+#    applies on reset (SET_GEOMETRY), a larger one too (SET_SYSTEM_AV_INFO),
+#    the old instance's GL objects are released, and the restarted cart reads
+#    the save the first instance wrote (green after a fresh start: its second
+#    run; blue after an .srm of one run: its third). The 2D save cart
+#    restarts the same way.
 set -u
 BUILD=${1:?build dir}; LUA=${2:?wasmcart-lua cart}; JIT=${3:?JIT engine cart}
 FE="$BUILD/lr_frontend"; CORE="$BUILD/wasmcart_libretro.so"
@@ -84,5 +93,28 @@ check_srm "save: the .srm holds the cart's save" 01
 run "save: the next run starts from it"       "$WORK/save.wasc" --frames 10 --sram-in "$WORK/save.srm" \
     --sram-out "$WORK/save.srm" --expect-pixel 10,10,22ff22
 check_srm "save: and saves on top of it" 02
+
+clang="${WASI_SDK:-$HOME/code/mine/wasi-sdk}/bin/clang"
+if [ ! -x "$clang" ]; then echo "FAIL reset: no wasi-sdk clang at $clang (set WASI_SDK)"; fail=$((fail + 1)); else
+"$clang" --target=wasm32 -O2 -nostdlib -Wl,--no-entry -Wl,--allow-undefined -o "$WORK/res.wasm" "$(dirname "$0")/rescart.c"
+run "reset: a lower Internal Resolution applies" "$WORK/res.wasm" --frames 20 --option wasmcart_resolution=960x540 \
+    --set-option 10:wasmcart_resolution=480x270 --reset-at 10 --expect-size 480x270 --expect-pixel 5,5,22ff22
+grep -q "SET_GEOMETRY 480x270" "$WORK/out.txt" && grep -q "released 1 GL objects" "$WORK/out.txt" \
+  && { echo "ok   reset: geometry announced, the old instance's GL objects released"; pass=$((pass + 1)); } \
+  || { echo "FAIL reset: geometry announced, the old instance's GL objects released"; grep -E "GEOMETRY|released" "$WORK/out.txt" | sed 's/^/     /'; fail=$((fail + 1)); }
+run "reset: a higher Internal Resolution applies" "$WORK/res.wasm" --frames 20 --option wasmcart_resolution=480x270 \
+    --set-option 10:wasmcart_resolution=1920x1080 --reset-at 10 --expect-size 1920x1080 --expect-pixel 1900,1060,22ff22
+grep -q "SET_SYSTEM_AV_INFO 1920x1080" "$WORK/out.txt" \
+  && { echo "ok   reset: a larger frame reinitializes video"; pass=$((pass + 1)); } \
+  || { echo "FAIL reset: a larger frame reinitializes video"; grep -E "GEOMETRY|AV_INFO" "$WORK/out.txt" | sed 's/^/     /'; fail=$((fail + 1)); }
+printf '\x01\x00\x00\x00' > "$WORK/save.srm"
+run "reset: the restarted cart reads the current save" "$WORK/res.wasm" --frames 20 --sram-in "$WORK/save.srm" \
+    --reset-at 10 --sram-out "$WORK/save.srm" --expect-pixel 5,5,2222ff
+check_srm "reset: and saves on top of it" 03
+printf '\x01\x00\x00\x00' > "$WORK/save.srm"
+run "reset: a 2D cart restarts with its save" "$WORK/save.wasc" --frames 20 --sram-in "$WORK/save.srm" \
+    --reset-at 10 --sram-out "$WORK/save.srm" --expect-pixel 10,10,2222ff
+check_srm "reset: the 2D cart saves on top of it" 03
+fi
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
