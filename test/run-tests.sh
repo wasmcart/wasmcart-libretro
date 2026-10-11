@@ -39,8 +39,18 @@
 #    the save the first instance wrote (green after a fresh start: its second
 #    run; blue after an .srm of one run: its third). The 2D save cart
 #    restarts the same way.
+# 8. WebGPU (the build must have wasmcart_libretro_wgpu/ beside the core, and
+#    the machine a Vulkan GPU): wasmcart-native's fixtures run on Dawn and
+#    their frames reach RetroArch's GL framebuffer with the right pixels. The
+#    dual cart (imports GL and WebGPU) draws green on WebGPU and red on GL:
+#    WebGPU when available, GL with the GPU API option on GL. The WebGPU-only
+#    cart (a triangle, and a compute result in its corner) runs, restarts on
+#    Restart Content and is refused with the reason on screen when WebGPU is
+#    off. A cart that resizes its surface is followed (SET_GEOMETRY), a lost
+#    device is said on screen and the core keeps running, and the
+#    performance log has its WebGPU line.
 set -u
-BUILD=${1:?build dir}; LUA=${2:?wasmcart-lua cart}; JIT=${3:?JIT engine cart}
+BUILD=$(cd "${1:?build dir}" && pwd); LUA=${2:?wasmcart-lua cart}; JIT=${3:?JIT engine cart}
 FE="$BUILD/lr_frontend"; CORE="$BUILD/wasmcart_libretro.so"
 # Copies, so the core's wasmcart.log lands here and not next to the carts.
 WORK=$(mktemp -d "$BUILD/lrtest.XXXXXX"); trap 'rm -rf "$WORK"' EXIT
@@ -115,6 +125,37 @@ printf '\x01\x00\x00\x00' > "$WORK/save.srm"
 run "reset: a 2D cart restarts with its save" "$WORK/save.wasc" --frames 20 --sram-in "$WORK/save.srm" \
     --reset-at 10 --sram-out "$WORK/save.srm" --expect-pixel 10,10,2222ff
 check_srm "reset: the 2D cart saves on top of it" 03
+fi
+WFX="$(dirname "$0")/../deps/wasmcart-native/test/wgpu"
+if [ ! -f "$BUILD/wasmcart_libretro_wgpu/wgpu_bridge.cjs" ]; then
+  echo "FAIL webgpu: $BUILD has no wasmcart_libretro_wgpu/ (configure with -DWASMCART_WGPU_JS_DIR and -DNATIVE_DAWN_DIR, README \"WebGPU carts\")"
+  fail=$((fail + 1))
+else
+for c in dualgpu wgpucart wgpuedges wgpulost; do cp "$WFX/$c.wasc" "$WORK/$c.wasc"; done
+run "webgpu: dual cart runs on WebGPU (green)"   "$WORK/dualgpu.wasc" --frames 30 --expect-video hw --expect-pixel 64,48,00ff00 \
+    --expect-message "WebGPU on "
+grep -q "wasmcart: WebGPU cart, on " "$WORK/out.txt" \
+  && { echo "ok   webgpu: the log names the adapter"; pass=$((pass + 1)); } \
+  || { echo "FAIL webgpu: the log names the adapter"; fail=$((fail + 1)); }
+run "webgpu: GPU API GL runs the dual cart on GL (red)" "$WORK/dualgpu.wasc" --frames 30 --option wasmcart_gpu_api=gl \
+    --expect-video hw --expect-pixel 64,48,ff0000 --expect-message "GL (no WebGPU: WebGPU is turned off"
+run "webgpu: WebGPU-only cart, triangle"         "$WORK/wgpucart.wasc" --frames 30 --expect-pixel 128,110,ff8040
+run "webgpu: WebGPU-only cart, compute result"   "$WORK/wgpucart.wasc" --frames 30 --expect-pixel 2,2,2a00ff
+run "webgpu: Restart Content restarts it"        "$WORK/wgpucart.wasc" --frames 40 --reset-at 20 --expect-pixel 128,110,ff8040
+if timeout -s KILL 180 "$FE" "$CORE" "$WORK/wgpucart.wasc" --frames 10 --option wasmcart_gpu_api=gl > "$WORK/out.txt" 2>&1; then
+  echo "FAIL webgpu: WebGPU-only cart refused with GPU API GL"; fail=$((fail + 1))
+else
+  grep -q "MESSAGE: This cart needs WebGPU, which is not available: WebGPU is turned off" "$WORK/out.txt" \
+    && { echo "ok   webgpu: WebGPU-only cart refused on screen with GPU API GL"; pass=$((pass + 1)); } \
+    || { echo "FAIL webgpu: WebGPU-only cart refused on screen with GPU API GL"; tail -3 "$WORK/out.txt" | sed 's/^/     /'; fail=$((fail + 1)); }
+fi
+run "webgpu: a cart that resizes its surface"    "$WORK/wgpuedges.wasc" --frames 20 --expect-size 160x120 --expect-pixel 150,110,0000ff
+run "webgpu: a lost device is said on screen"    "$WORK/wgpulost.wasc" --frames 40 --expect-message "The GPU device was lost"
+# (the log goes to the frontend's save directory; lr_frontend has none, so the working directory)
+( cd "$WORK" && WASMCART_PERF_LOG=1 timeout -s KILL 180 "$FE" "$CORE" "$WORK/wgpucart.wasc" --frames 6000 > "$WORK/out.txt" 2>&1 )
+grep -q "webgpu | cart .* latency .* shown" "$WORK/wasmcart-perf.log" 2>/dev/null \
+  && { echo "ok   webgpu: the performance log has its WebGPU line"; pass=$((pass + 1)); } \
+  || { echo "FAIL webgpu: the performance log has its WebGPU line"; fail=$((fail + 1)); }
 fi
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

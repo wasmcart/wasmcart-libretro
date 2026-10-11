@@ -153,6 +153,8 @@ static bool gl_refused = false;
 static bool first_frame = true;
 // A WebGPU cart's frame has been shown (present_wgpu_frame).
 static bool wgpu_shown = false;
+// The player was told this cart's WebGPU device is lost.
+static bool wgpu_lost_told = false;
 static uint32_t cart_w = 0, cart_h = 0;
 // Largest geometry we have told RetroArch about (sizes its HW render FBO).
 static uint32_t max_w = 0, max_h = 0;
@@ -737,6 +739,7 @@ static bool load_cart(void) {
     opts.wgpu_disabled = wgpu_disabled;
     jit_notice_shown = false;
     wgpu_shown = false;
+    wgpu_lost_told = false;
     opts.defer_init = true;  // always defer — we'll finish in context_reset or first frame
     opts.save_data = sram;
     opts.save_data_size = sram ? sram_size : 0;
@@ -744,6 +747,13 @@ static bool load_cart(void) {
     int rc = wc_host_load_file(host, game_path, &opts);
     if (rc != 0) {
         if (log_cb) log_cb(RETRO_LOG_ERROR, "wasmcart: failed to load %s\n", game_path);
+        const char* why = wc_host_wgpu_unavailable_reason(host);
+        if (why && *why) {
+            // A WebGPU-only cart on a host without WebGPU: say why, where the player looks.
+            char msg[400];
+            snprintf(msg, sizeof msg, "This cart needs WebGPU, which is not available: %s", why);
+            notify(msg, RETRO_LOG_ERROR, 15000);
+        }
         return false;
     }
 
@@ -890,6 +900,18 @@ void retro_unload_game(void) {
 static struct { double cart, queue, wait, upload, latency; bool shown; } wgpu_t;
 static double perf_now_ms(void);
 static void present_wgpu_frame(void) {
+    // A lost device (a driver reset, the GPU gone): the cart cannot go on;
+    // the last frame stays on screen and the player is told why, once.
+    const char* lost = wc_host_gpu_lost(host);
+    if (lost) {
+        if (!wgpu_lost_told) {
+            wgpu_lost_told = true;
+            char msg[400];
+            snprintf(msg, sizeof msg, "The GPU device was lost (%s). The cart is stopped; Restart Content starts it again.", lost);
+            notify(msg, RETRO_LOG_ERROR, 15000);
+        }
+        return;
+    }
     double t0 = perf_now_ms();
     wc_host_wgpu_frame_queue(host);
     double t1 = perf_now_ms();

@@ -123,9 +123,25 @@ Which GPU API a cart gets:
 | GL + WebGPU (dual) | WebGPU | GL (the log says why) |
 | WebGPU only | WebGPU | refused at load, with the reason on screen |
 
-The log (RetroArch's, and `wasmcart.log` beside the cart) says which one was
-picked and the adapter name (`WebGPU on <adapter>`), or why there is no WebGPU.
-`WASMCART_NO_WGPU=1` in the environment makes the core act as a host without WebGPU.
+On load the core shows which one a cart that imports WebGPU got (`WebGPU on
+<adapter>`, or `GL (no WebGPU: <why>)`), and the log (RetroArch's, and
+`wasmcart.log` beside the cart) says the same. The core option **GPU API** set
+to GL, or `WASMCART_NO_WGPU=1` in the environment, makes the core act as a host
+without WebGPU.
+
+The frame copy is pipelined: frame N's copy is queued as soon as it is rendered,
+and frame N-1, copied while N rendered, is drawn into RetroArch's framebuffer
+straight from the mapped buffer. The picture is one frame behind the cart, and
+the core waits only when the GPU has not finished the previous frame by the
+next `retro_run`. A lost device (a driver reset) stops the cart with an
+on-screen message; Restart Content starts it again.
+
+The WebGPU device follows the wasmcart WebGPU tier: the adapter is requested in
+WebGPU compatibility mode (the tier's floor, so a cart cannot depend on more
+than a GLES 3.1-class GPU has), as every wasmcart host does. A cart that asks
+its adapter for info sees backend "WebGPU", type unknown and ids 0 (the
+emdawnwebgpu glue reports that on every JavaScript host, browsers included);
+the host log names the real GPU.
 
 Platforms: the Linux x86_64 and aarch64 release tarballs include
 `wasmcart_libretro_wgpu/`. The macOS, Windows and Android cores ship without
@@ -147,6 +163,8 @@ cmake --build build    # build/wasmcart_libretro.so + build/wasmcart_libretro_wg
 
 - **Internal Resolution**: 270p, 360p, 640x480, 540p, 720p, 1080p, 1440p, 4K — passed to the cart as its preferred resolution (`wc_host_info_t`); a cart that follows it (cartwheel games do) renders the largest frame of its own aspect that fits, and RetroArch shows it at that aspect. Applies when content loads or restarts (Quick Menu → Restart Content)
 - **Runtime Code Generation**: Enabled (default) / Disabled, applied when content loads (`WASMCART_JIT=0` in the environment also turns it off). A cart that asks for it while it is off runs without it, and the core shows an on-screen notice on its first request saying so.
+- **GPU API**: Auto (WebGPU when available, the default) / GL — which API a cart that imports both GL and WebGPU runs on (see "WebGPU carts"). With GL, a WebGPU-only cart does not start, and the core says so on screen. Applies when content loads or restarts.
+- **Performance Log**: Disabled (default) / Enabled (`WASMCART_PERF_LOG=1` too) — once a second, the frame rate and where each frame's time went, written to RetroArch's log and to `wasmcart-perf.log` in the save directory. A WebGPU cart gets a second line: the cart's `wc_render` (with the WebGPU glue), queueing the frame's copy, the time waiting for the frame shown, the GL upload, and the latency from queue to mapped (the GPU's frame and the copy).
 
 ## Tests (Linux)
 
@@ -154,6 +172,12 @@ cmake --build build    # build/wasmcart_libretro.so + build/wasmcart_libretro_wg
 cmake -B build -DWASMCART_LIBRETRO_TESTS=ON && cmake --build build
 test/run-tests.sh build <wasmcart-lua cart.wasc> <JIT engine cart.wasc>
 ```
+
+The build must have WebGPU (configure with `-DWASMCART_WGPU_JS_DIR` and
+`-DNATIVE_DAWN_DIR`, "WebGPU carts" above) and the machine a Vulkan GPU: the
+WebGPU part runs wasmcart-native's fixtures on Dawn (dual cart on WebGPU and,
+with GPU API GL, on GL; a WebGPU-only cart, restarted and refused; a surface
+resize; a lost device; the performance log's WebGPU line), checking pixels.
 
 `test/lr_frontend` is a headless libretro frontend (Mesa surfaceless EGL). The script restores a save state mid-run, carries a JIT cart's state across a restore and across sessions, checks the JIT-off notice, and carries a save (SAVE_RAM) across sessions in RetroArch's order (the .srm copied in after retro_load_game, before context_reset and the first retro_run), and restarts a cart (Restart Content: a changed Internal Resolution applies, the save carries over).
 
