@@ -213,6 +213,8 @@ jobs:
             Install: copy `wasmcart_libretro.so` (or `.dylib` / `.dll`) to your RetroArch cores directory.
 
             Linux (x86_64, aarch64): the tarball also has `wasmcart_libretro_wgpu/`. Keep it in the same directory as `wasmcart_libretro.so`: with it, carts that import WebGPU run on WebGPU (Dawn on Vulkan, independent of RetroArch's video driver); without it, or without a Vulkan driver, dual GL + WebGPU carts run on GL. macOS, Windows and Android cores run carts on GL only.
+
+            How a WebGPU frame reaches RetroArch's GL framebuffer (Linux): Dawn is put on the GPU of RetroArch's GL context, and the frame is shared with GL on the GPU, zero-copy and the same frame, when GL has GL_EXT_memory_object_fd and GL_EXT_semaphore_fd from the same driver as Vulkan (Mesa radeonsi + RADV on AMD, and other Mesa drivers with those extensions). Otherwise it is read back through the CPU, one frame late, and the core says so in its log and on screen with the reason ("WebGPU frames reach GL by READBACK").
           files: |
             artifacts/wasmcart_libretro-linux-x86_64/*.tar.gz
             artifacts/wasmcart_libretro-linux-aarch64/*.tar.gz
