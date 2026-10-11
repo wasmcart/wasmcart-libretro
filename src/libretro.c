@@ -274,10 +274,15 @@ static const struct retro_core_option_v2_definition option_defs[] = {
         "wasmcart_resolution",
         "Internal Resolution",
         NULL,
-        "Resolution passed to the cart. The cart decides its actual render size.",
+        "The frame size the cart is asked to render (the host's preferred size). A cart that follows it "
+        "renders the largest frame of its own aspect that fits (a 16:9 game at 640x480 renders 640x360, shown at 16:9); "
+        "a cart may also choose its own size. Lower is faster on a slow GPU. Applies when content is loaded.",
         NULL, "video",
         {
+            { "480x270",   "480x270 (270p)" },
+            { "640x360",   "640x360 (360p)" },
             { "640x480",   "640x480" },
+            { "960x540",   "960x540 (540p)" },
             { "1280x720",  "1280x720 (720p)" },
             { "1920x1080", "1920x1080 (1080p)" },
             { "2560x1440", "2560x1440 (1440p)" },
@@ -446,7 +451,7 @@ void retro_set_environment(retro_environment_t cb) {
 void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "wasmcart";
-    info->library_version = "0.6.1";
+    info->library_version = "0.7.2";
     info->valid_extensions = "wasc|wasm";
     info->need_fullpath = true;   // we read the file ourselves (ZIP)
     info->block_extract = true;   // don't extract, we handle ZIP

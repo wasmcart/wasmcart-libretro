@@ -112,7 +112,7 @@ Engines that can build both backends into one cart are the way to ship one
 
 ## Core Options
 
-- **Internal Resolution**: 640x480, 720p, 1080p, 1440p, 4K — passed to cart as preferred resolution
+- **Internal Resolution**: 270p, 360p, 640x480, 540p, 720p, 1080p, 1440p, 4K — passed to the cart as its preferred resolution (`wc_host_info_t`); a cart that follows it (cartwheel games do) renders the largest frame of its own aspect that fits, and RetroArch shows it at that aspect. Applies when content is loaded (Restart Content after changing it)
 - **Runtime Code Generation**: Enabled (default) / Disabled, applied when content loads (`WASMCART_JIT=0` in the environment also turns it off). A cart that asks for it while it is off runs without it, and the core shows an on-screen notice on its first request saying so.
 
 ## Tests (Linux)

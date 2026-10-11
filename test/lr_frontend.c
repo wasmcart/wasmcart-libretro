@@ -11,7 +11,7 @@
 //               [--gles2 real|es3] [--expect-video sw|hw|black]
 //               [--expect-pixel X,Y,RRGGBB]
 //               [--sram-in FILE] [--sram-out FILE]
-//               [--input FILE] [--shot F:FILE.ppm]...
+//               [--input FILE] [--shot F:FILE.ppm]... [--timing F]
 //
 // --input plays a RetroPad on port 0 from a script: one line per change,
 // "<frame> <buttons> <lx> <ly> [<rx> <ry>]", buttons a comma list of RetroPad
@@ -21,6 +21,9 @@
 // --shot F:FILE writes the frame the core presented at retro_run F (0-based)
 // as a binary PPM, top row first (hardware frames read back from the
 // frontend's framebuffer). Up to 32.
+// --timing F times every retro_run from frame F on, each followed by glFinish
+// (the GPU work of the frame counted, as a frontend's swap would wait for it),
+// and prints the mean, median, 95th percentile and worst frame in ms.
 //
 // --sram-in loads FILE into the core's SAVE_RAM in RetroArch's order: right
 // after retro_load_game, before context_reset and the first retro_run, it
@@ -55,6 +58,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define MAX_OPTIONS 8
@@ -168,6 +172,10 @@ static void audio_cb(int16_t l, int16_t r) { (void)l; (void)r; }
 static struct { long frame; unsigned buttons; int16_t ax[4]; } in_script[MAX_SCRIPT];
 static int in_count = 0, in_pos = -1;
 static long cur_frame = 0;
+static int cmp_double(const void* a, const void* b) {
+    double x = *(const double*)a, y = *(const double*)b;
+    return x < y ? -1 : x > y;
+}
 static int load_input(const char* path) {
     static const char* names[16] = { "b", "y", "select", "start", "up", "down", "left", "right",
                                      "a", "x", "l", "r", "l2", "r2", "l3", "r3" };
@@ -298,7 +306,7 @@ int main(int argc, char** argv) {
                         "[--option key=value]... [--expect-message TEXT]\n", argv[0]);
         return 2;
     }
-    long frames = 300, save_at = -1, restore_at = -1;
+    long frames = 300, save_at = -1, restore_at = -1, timing_from = -1;
     const char* state_out = NULL;
     const char* state_in = NULL;
     long unplug_at = -1;
@@ -317,6 +325,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--sram-in")) sram_in = argv[i + 1];
         else if (!strcmp(argv[i], "--sram-out")) sram_out = argv[i + 1];
         else if (!strcmp(argv[i], "--expect-video")) expect_video = argv[i + 1];
+        else if (!strcmp(argv[i], "--timing")) timing_from = atol(argv[i + 1]);
         else if (!strcmp(argv[i], "--input")) {
             if (!load_input(argv[i + 1])) { fprintf(stderr, "lr_frontend: cannot read %s\n", argv[i + 1]); return 2; }
         }
@@ -404,6 +413,8 @@ int main(int argc, char** argv) {
 
     void* state = NULL;
     size_t state_size = 0;
+    double* times = NULL;
+    long n_times = 0;
     for (long f = 0; f < frames && !trapped; f++) {
         if (f == save_at) {
             state_size = retro_serialize_size();
@@ -434,9 +445,25 @@ int main(int argc, char** argv) {
             printf("lr_frontend: frame %ld port 0 unplugged\n", f);
         }
         cur_frame = f;
+        struct timespec t0, t1;
+        if (timing_from >= 0 && f >= timing_from) clock_gettime(CLOCK_MONOTONIC, &t0);
         retro_run();
+        if (timing_from >= 0 && f >= timing_from) {
+            glFinish();
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            if (!times) times = calloc((size_t)frames, sizeof *times);
+            if (times) times[n_times++] = (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+        }
         for (int k = 0; k < shot_count; k++)
             if (shot_frame[k] == f) write_shot(shot_file[k]);
+    }
+    if (n_times) {
+        double sum = 0;
+        for (long i = 0; i < n_times; i++) sum += times[i];
+        qsort(times, (size_t)n_times, sizeof *times, cmp_double);
+        printf("lr_frontend: timing %ld frames from %ld: mean %.2f ms, median %.2f, p95 %.2f, worst %.2f\n", n_times, timing_from,
+               sum / (double)n_times, times[n_times / 2], times[(n_times * 95) / 100 < n_times ? (n_times * 95) / 100 : n_times - 1],
+               times[n_times - 1]);
     }
     if (sram_out) {
         size_t size = retro_get_memory_size(RETRO_MEMORY_SAVE_RAM);
