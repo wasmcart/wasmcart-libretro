@@ -10,7 +10,13 @@
 //               [--state-out FILE] [--state-in FILE] [--unplug-at F]
 //               [--gles2 real|es3] [--expect-video sw|hw|black]
 //               [--expect-pixel X,Y,RRGGBB]
+//               [--sram-in FILE] [--sram-out FILE]
 //
+// --sram-in loads FILE into the core's SAVE_RAM in RetroArch's order: right
+// after retro_load_game, before context_reset and the first retro_run, it
+// reads retro_get_memory_size/data and copies min(file, size) bytes in.
+// --sram-out writes SAVE_RAM to FILE after the last frame, as RetroArch does
+// on unload (nothing is written if the size is 0).
 // --state-out writes the state taken at --save-at to FILE; --state-in makes
 // --restore-at restore FILE instead, so a state can cross sessions (save,
 // quit, start again, load), which is when a JIT cart's slots are all gone.
@@ -197,6 +203,8 @@ int main(int argc, char** argv) {
     const char* state_in = NULL;
     long unplug_at = -1;
     const char* expect_video = NULL;
+    const char* sram_in = NULL;
+    const char* sram_out = NULL;
     for (int i = 3; i + 1 < argc; i += 2) {
         if (!strcmp(argv[i], "--frames")) frames = atol(argv[i + 1]);
         else if (!strcmp(argv[i], "--save-at")) save_at = atol(argv[i + 1]);
@@ -206,6 +214,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--state-in")) state_in = argv[i + 1];
         else if (!strcmp(argv[i], "--unplug-at")) unplug_at = atol(argv[i + 1]);
         else if (!strcmp(argv[i], "--gles2")) gles2 = argv[i + 1];
+        else if (!strcmp(argv[i], "--sram-in")) sram_in = argv[i + 1];
+        else if (!strcmp(argv[i], "--sram-out")) sram_out = argv[i + 1];
         else if (!strcmp(argv[i], "--expect-video")) expect_video = argv[i + 1];
         else if (!strcmp(argv[i], "--expect-pixel")) {
             if (sscanf(argv[i + 1], "%ld,%ld,%x", &px_x, &px_y, &px_want) != 3) return 2;
@@ -240,11 +250,13 @@ int main(int argc, char** argv) {
     bool (*retro_unserialize)(const void*, size_t);
     void (*retro_unload_game)(void);
     void (*retro_set_controller_port_device)(unsigned, unsigned);
+    size_t (*retro_get_memory_size)(unsigned);
+    void* (*retro_get_memory_data)(unsigned);
     SYM(retro_set_environment); SYM(retro_set_video_refresh); SYM(retro_set_audio_sample);
     SYM(retro_set_audio_sample_batch); SYM(retro_set_input_poll); SYM(retro_set_input_state);
     SYM(retro_init); SYM(retro_load_game); SYM(retro_get_system_av_info); SYM(retro_run);
     SYM(retro_serialize_size); SYM(retro_serialize); SYM(retro_unserialize); SYM(retro_unload_game);
-    SYM(retro_set_controller_port_device);
+    SYM(retro_set_controller_port_device); SYM(retro_get_memory_size); SYM(retro_get_memory_data);
 
     retro_set_environment(env_cb);
     retro_set_video_refresh(video_cb);
@@ -256,6 +268,20 @@ int main(int argc, char** argv) {
 
     struct retro_game_info game = { argv[2], NULL, 0, NULL };
     if (!retro_load_game(&game)) { fprintf(stderr, "lr_frontend: load failed\n"); return 1; }
+    if (sram_in) {
+        // RetroArch's content_load_ram_file: before video init (context_reset)
+        // and before the first retro_run; a size of 0 loads nothing.
+        size_t size = retro_get_memory_size(RETRO_MEMORY_SAVE_RAM);
+        void* data = retro_get_memory_data(RETRO_MEMORY_SAVE_RAM);
+        FILE* in = fopen(sram_in, "rb");
+        if (!in) { fprintf(stderr, "lr_frontend: cannot read %s\n", sram_in); return 1; }
+        unsigned char buf[65536];
+        size_t n = fread(buf, 1, sizeof buf, in);
+        fclose(in);
+        if (n > size) n = size;
+        if (data && n) memcpy(data, buf, n);
+        printf("lr_frontend: SAVE_RAM size %zu at load, %zu bytes loaded\n", size, n);
+    }
     struct retro_system_av_info av;
     memset(&av, 0, sizeof av);
     retro_get_system_av_info(&av);
@@ -299,6 +325,13 @@ int main(int argc, char** argv) {
             printf("lr_frontend: frame %ld port 0 unplugged\n", f);
         }
         retro_run();
+    }
+    if (sram_out) {
+        size_t size = retro_get_memory_size(RETRO_MEMORY_SAVE_RAM);
+        void* data = retro_get_memory_data(RETRO_MEMORY_SAVE_RAM);
+        FILE* o = size && data ? fopen(sram_out, "wb") : NULL;
+        if (o) { fwrite(data, 1, size, o); fclose(o); }
+        printf("lr_frontend: SAVE_RAM size %zu at unload%s\n", size, o ? ", written" : ", nothing written");
     }
     fflush(stdout);
     // _exit throughout: V8 teardown at exit is not what is under test.

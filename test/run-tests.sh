@@ -24,6 +24,12 @@
 #    and the screen stays black. A driver that hands back an ES3 context for
 #    the ES2 request runs the GL cart. On GLES3 the 2D cart still presents
 #    through GL.
+# 6. Saves persist across sessions, in RetroArch's SRAM order: SAVE_RAM's
+#    size and data are read and the .srm copied in right after
+#    retro_load_game, before context_reset and the first retro_run (the
+#    save region was size 0 then, so nothing loaded and every start was a
+#    fresh game). The save cart (wasmcart-native's fixture) counts its runs
+#    in the save region and shows the count wc_init read: red 0, green 1.
 set -u
 BUILD=${1:?build dir}; LUA=${2:?wasmcart-lua cart}; JIT=${3:?JIT engine cart}
 FE="$BUILD/lr_frontend"; CORE="$BUILD/wasmcart_libretro.so"
@@ -63,5 +69,20 @@ run "GLES2 only: 2D cart presents in software" "$WORK/snake.wasc" --frames 60 --
 run "GLES2 only: GL cart refused on screen"   "$WORK/lua.wasc" --frames 60 --gles2 real --expect-video black \
     --expect-message "GLES 3.0 required"
 run "ES2 request, ES3 context: GL cart runs"  "$WORK/lua.wasc" --frames 60 --gles2 es3 --expect-video hw
+SAVE="$(dirname "$0")/../deps/wasmcart-native/test/savecart.wasc"
+cp "$SAVE" "$WORK/save.wasc"
+run "save: a first run starts from no save"   "$WORK/save.wasc" --frames 10 --sram-out "$WORK/save.srm" \
+    --expect-pixel 10,10,ff2222
+check_srm() { # name, expected first byte
+  if [ "$(od -An -tx1 -N1 "$WORK/save.srm" 2>/dev/null | tr -d ' ')" = "$2" ]; then
+    echo "ok   $1"; pass=$((pass + 1))
+  else
+    echo "FAIL $1"; od -An -tx1 "$WORK/save.srm" 2>&1 | sed 's/^/     /'; fail=$((fail + 1))
+  fi
+}
+check_srm "save: the .srm holds the cart's save" 01
+run "save: the next run starts from it"       "$WORK/save.wasc" --frames 10 --sram-in "$WORK/save.srm" \
+    --sram-out "$WORK/save.srm" --expect-pixel 10,10,22ff22
+check_srm "save: and saves on top of it" 02
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

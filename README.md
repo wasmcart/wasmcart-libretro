@@ -122,7 +122,7 @@ cmake -B build -DWASMCART_LIBRETRO_TESTS=ON && cmake --build build
 test/run-tests.sh build <wasmcart-lua cart.wasc> <JIT engine cart.wasc>
 ```
 
-`test/lr_frontend` is a headless libretro frontend (Mesa surfaceless EGL). The script restores a save state mid-run, carries a JIT cart's state across a restore and across sessions, and checks the JIT-off notice.
+`test/lr_frontend` is a headless libretro frontend (Mesa surfaceless EGL). The script restores a save state mid-run, carries a JIT cart's state across a restore and across sessions, checks the JIT-off notice, and carries a save (SAVE_RAM) across sessions in RetroArch's order (the .srm copied in after retro_load_game, before context_reset and the first retro_run).
 
 ## Build Targets
 
