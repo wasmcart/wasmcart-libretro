@@ -39,6 +39,8 @@
 #    the save the first instance wrote (green after a fresh start: its second
 #    run; blue after an .srm of one run: its third). The 2D save cart
 #    restarts the same way.
+# 9. A cart thread that dies (wasmcart-native's threaddie fixture: its thread
+#    traps at once) stops the cart with the reason on screen.
 # 8. WebGPU (the build must have wasmcart_libretro_wgpu/ beside the core, and
 #    the machine a Vulkan GPU): wasmcart-native's fixtures run on Dawn and
 #    their frames reach RetroArch's GL framebuffer with the right pixels. The
@@ -132,6 +134,11 @@ run "reset: a 2D cart restarts with its save" "$WORK/save.wasc" --frames 20 --sr
     --reset-at 10 --sram-out "$WORK/save.srm" --expect-pixel 10,10,2222ff
 check_srm "reset: the 2D cart saves on top of it" 03
 fi
+cp "$(dirname "$0")/../deps/wasmcart-native/test/threaddie.wasc" "$WORK/threaddie.wasc"
+timeout -s KILL 180 "$FE" "$CORE" "$WORK/threaddie.wasc" --frames 30 > "$WORK/out.txt" 2>&1
+grep -q "MESSAGE: The cart stopped: cart thread [0-9]* died" "$WORK/out.txt" \
+  && { echo "ok   a cart thread that dies stops the cart, said on screen"; pass=$((pass + 1)); } \
+  || { echo "FAIL a cart thread that dies stops the cart, said on screen"; tail -3 "$WORK/out.txt" | sed 's/^/     /'; fail=$((fail + 1)); }
 WFX="$(dirname "$0")/../deps/wasmcart-native/test/wgpu"
 if [ ! -f "$BUILD/wasmcart_libretro_wgpu/wgpu_bridge.cjs" ]; then
   echo "FAIL webgpu: $BUILD has no wasmcart_libretro_wgpu/ (configure with -DWASMCART_WGPU_JS_DIR and -DNATIVE_DAWN_DIR, README \"WebGPU carts\")"

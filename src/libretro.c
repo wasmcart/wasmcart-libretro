@@ -1320,6 +1320,15 @@ static void run_frame(double* delta_out) {
 
     if (wc_host_has_trapped(host)) {
         if (log_cb) log_cb(RETRO_LOG_ERROR, "wasmcart: cart trapped\n");
+        // said on screen once: why the cart stopped (a cart thread that died, ...)
+        static wc_host_t* told = NULL;
+        const char* why = wc_host_trap_reason(host);
+        if (why && told != host) {
+            told = host;
+            char msg[600];
+            snprintf(msg, sizeof msg, "The cart stopped: %s", why);
+            notify(msg, RETRO_LOG_ERROR, 15000);
+        }
         return;
     }
 
