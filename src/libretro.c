@@ -1,6 +1,9 @@
 // libretro.c — wasmcart libretro core
 // Bridges RetroArch ↔ wasmcart host API (cart_host.cpp)
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include "libretro.h"
 #include "../include/wasmcart_host.h"
 
@@ -934,11 +937,21 @@ static void present_wgpu_frame(void) {
 
 static void run_frame(double* delta_out);
 static void perf_frame(double t_enter, double t_exit, double delta_ms);
+#ifdef _WIN32
+static double perf_now_ms(void) {
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER now;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    return (double)now.QuadPart * 1e3 / (double)freq.QuadPart;
+}
+#else
 static double perf_now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec * 1e-6;
 }
+#endif
 
 void retro_run(void) {
     if (!perf_log_on) { run_frame(NULL); return; }
