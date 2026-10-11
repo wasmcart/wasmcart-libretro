@@ -164,15 +164,6 @@ static bool in_reset = false, av_info_pending = false;
 static uint32_t frame_count = 0;
 static double time_ms = 0;
 
-// Per-frame delta the frontend reports via RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK
-// (called right before each retro_run). 0 until the first callback (then we fall
-// back to a fixed 1000/60 step). Carts read wc_time.delta_ms for motion (e.g.
-// racer's physics/AI/camera/audio all scale by dt), so a blind fixed step makes a
-// genuine frontend stall produce SLOW-MOTION instead of a dropped frame. The
-// frontend substitutes the reference value during fast-forward / slow-motion /
-// frame-stepping / pause, so those stay correct without the core detecting them.
-static double frame_time_ms = 0.0;
-static void frame_time_cb(retro_usec_t usec) { frame_time_ms = (double)usec / 1000.0; }
 
 // Audio conversion buffer (F32 → S16)
 static int16_t* audio_conv_buf = NULL;
@@ -519,7 +510,7 @@ void retro_set_environment(retro_environment_t cb) {
 void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "wasmcart";
-    info->library_version = "0.8.1";
+    info->library_version = "0.8.2";
     info->valid_extensions = "wasc|wasm";
     info->need_fullpath = true;   // we read the file ourselves (ZIP)
     info->block_extract = true;   // don't extract, we handle ZIP
@@ -797,14 +788,6 @@ bool retro_load_game(const struct retro_game_info* game) {
     enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_XRGB8888;
     environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt);
 
-    // Ask the frontend to report per-frame elapsed time so carts get a real dt
-    // (idiomatic libretro timing). reference = ideal µs/frame; the frontend
-    // substitutes it during FF/slow-mo/pause. Optional — if the frontend declines,
-    // delta falls back to a fixed 1000/60 below (exact current behavior).
-    struct retro_frame_time_callback frame_time = {
-        frame_time_cb, (retro_usec_t)(1000000.0 / 60.0)
-    };
-    environ_cb(RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK, &frame_time);
 
     snprintf(game_path, sizeof game_path, "%s", game->path);
     if (!load_cart()) return false;
@@ -1120,16 +1103,16 @@ static void run_frame(double* delta_out) {
         if (wdx || wdy) wc_host_add_wheel(host, wdx, wdy);
     }
 
-    // 3. Set time — use the frontend-reported per-frame delta when available so a
-    // slow retro_run yields a correct large dt (carts drop a frame) instead of
-    // slow-motion; the frontend feeds the reference during FF/slow-mo/pause so
-    // those stay correct. Clamp to 4 frames so a long hitch/resume can't teleport
-    // a dt-correct cart. Falls back to a fixed 1000/60 if the frontend never
-    // registers the callback (frame_time_ms == 0) — exact prior behavior.
+    // 3. Set time: one retro_run is one frame of the frontend's timing (60 fps),
+    // so a cart advances 1000/60 ms and makes that much audio. The frontend's
+    // measured frame time is NOT used: a cart makes audio for the dt it is given
+    // (cartwheel: audio_ms_owed += delta_ms), so one slow frame made up to 66 ms
+    // of audio, RetroArch's audio sync blocked ~66 ms to play it, the next frame
+    // measured 66 ms again, and the game held at 15 fps until dynamic rate
+    // control drained it (15 -> 23 -> 47 -> 60 fps over ~37 s on a Vega 8 box).
+    // RetroArch paces retro_run and handles fast-forward / slow-motion itself.
     const double FIXED_STEP = 1000.0 / 60.0;
-    double delta_ms = (frame_time_ms > 0.0)
-        ? (frame_time_ms < FIXED_STEP * 4.0 ? frame_time_ms : FIXED_STEP * 4.0)
-        : FIXED_STEP;
+    double delta_ms = FIXED_STEP;
     time_ms += delta_ms;
     if (delta_out) *delta_out = delta_ms;
     wc_host_set_time(host, time_ms, delta_ms, frame_count);
