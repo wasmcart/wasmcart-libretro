@@ -9,6 +9,12 @@ on:
 
 env:
   LIBNODE_VERSION: v26.3.0-jsg9
+  # WebGPU support for the Linux cores (wasmcart_libretro_wgpu/ beside the
+  # .so): Dawn from native-dawn's release (sha256 pinned in
+  # deps/wasmcart-native/scripts/fetch-wgpu-deps.sh) and wasmcart's WebGPU
+  # host JavaScript from its npm package.
+  NATIVE_DAWN_VERSION: 0.1.3
+  WASMCART_VERSION: 0.32.0
 
 jobs:
   build-linux-x86_64:
@@ -23,12 +29,20 @@ jobs:
         run: |
           mkdir -p deps/libnode
           curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-linux-x86_64.tar.gz | tar xz -C deps/libnode
+      - name: Fetch WebGPU support (native-dawn, wasmcart JS)
+        run: sh deps/wasmcart-native/scripts/fetch-wgpu-deps.sh linux-x64 deps/wgpu
       - name: Build
-        run: mkdir build && cd build && cmake .. && make -j$(nproc)
+        run: |
+          mkdir build && cd build
+          cmake .. -DWASMCART_WGPU_JS_DIR=$PWD/../deps/wgpu/wasmcart/src/wgpu -DNATIVE_DAWN_DIR=$PWD/../deps/wgpu/native-dawn
+          make -j$(nproc)
       - name: Package
         run: |
           strip build/wasmcart_libretro.so
-          tar czf wasmcart_libretro-linux-x86_64.tar.gz -C build wasmcart_libretro.so
+          for f in wgpu_bridge.cjs dawn.node libwebgpu_dawn.so package.json src/cartMemory.js src/wgpu/host.js src/wgpu/emdawnwebgpu-glue.mjs; do
+            test -f build/wasmcart_libretro_wgpu/$f || { echo "missing wasmcart_libretro_wgpu/$f"; exit 1; }
+          done
+          tar czf wasmcart_libretro-linux-x86_64.tar.gz -C build wasmcart_libretro.so wasmcart_libretro_wgpu
       - uses: actions/upload-artifact@v7
         with:
           name: wasmcart_libretro-linux-x86_64
@@ -46,12 +60,20 @@ jobs:
         run: |
           mkdir -p deps/libnode
           curl -sL https://github.com/wasmcart/build-libnode/releases/download/${{ env.LIBNODE_VERSION }}/libnode-linux-aarch64.tar.gz | tar xz -C deps/libnode
+      - name: Fetch WebGPU support (native-dawn, wasmcart JS)
+        run: sh deps/wasmcart-native/scripts/fetch-wgpu-deps.sh linux-arm64 deps/wgpu
       - name: Build
-        run: mkdir build && cd build && cmake .. && make -j$(nproc)
+        run: |
+          mkdir build && cd build
+          cmake .. -DWASMCART_WGPU_JS_DIR=$PWD/../deps/wgpu/wasmcart/src/wgpu -DNATIVE_DAWN_DIR=$PWD/../deps/wgpu/native-dawn
+          make -j$(nproc)
       - name: Package
         run: |
           strip build/wasmcart_libretro.so
-          tar czf wasmcart_libretro-linux-aarch64.tar.gz -C build wasmcart_libretro.so
+          for f in wgpu_bridge.cjs dawn.node libwebgpu_dawn.so package.json src/cartMemory.js src/wgpu/host.js src/wgpu/emdawnwebgpu-glue.mjs; do
+            test -f build/wasmcart_libretro_wgpu/$f || { echo "missing wasmcart_libretro_wgpu/$f"; exit 1; }
+          done
+          tar czf wasmcart_libretro-linux-aarch64.tar.gz -C build wasmcart_libretro.so wasmcart_libretro_wgpu
       - uses: actions/upload-artifact@v7
         with:
           name: wasmcart_libretro-linux-aarch64
@@ -186,6 +208,8 @@ jobs:
             Supports 2D framebuffer carts, GL carts (Godot, ioquake3, GZDoom), and all wasmcart ABI features.
 
             Install: copy `wasmcart_libretro.so` (or `.dylib` / `.dll`) to your RetroArch cores directory.
+
+            Linux (x86_64, aarch64): the tarball also has `wasmcart_libretro_wgpu/`. Keep it in the same directory as `wasmcart_libretro.so`: with it, carts that import WebGPU run on WebGPU (Dawn on Vulkan, independent of RetroArch's video driver); without it, or without a Vulkan driver, dual GL + WebGPU carts run on GL. macOS, Windows and Android cores run carts on GL only.
           files: |
             artifacts/wasmcart_libretro-linux-x86_64/*.tar.gz
             artifacts/wasmcart_libretro-linux-aarch64/*.tar.gz

@@ -35,6 +35,7 @@ make -j$(nproc)
 # 4. Install
 CORES=~/.var/app/org.libretro.RetroArch/config/retroarch/cores
 cp wasmcart_libretro.so $CORES/
+cp -r wasmcart_libretro_wgpu $CORES/   # if built with WebGPU (see "WebGPU carts")
 cp ../wasmcart_libretro.info $CORES/
 ```
 
@@ -99,16 +100,48 @@ RetroArch provides a Core 3.3 GL context (via GLX). ES 3.0 shaders (`#version 30
 ## WebGPU carts
 
 wasmcart has an optional WebGPU tier ([docs/webgpu.md](https://github.com/wasmcart/wasmcart/blob/main/docs/webgpu.md)).
-This core does not run it yet: libretro has no WebGPU hardware context, and
-Dawn cannot adopt RetroArch's GL or Vulkan device. So:
+libretro has no WebGPU hardware context, so the core makes its own WebGPU device
+through [Dawn](https://dawn.googlesource.com/dawn) (Vulkan on Linux), independent
+of RetroArch's video driver, which stays `gl`. The cart renders on that device,
+and each frame is copied into RetroArch's GL framebuffer, so shaders, overlays,
+screenshots and recording work as for a GL cart.
 
-- A WebGPU-only cart is refused at load, and RetroArch shows the reason
-  (`this cart is a WebGPU cart, but this host cannot provide WebGPU`).
-- A cart that imports both GL and WebGPU runs here on GL. The host leaves
-  `WC_HOST_FLAG_GPU_WGPU` clear in host-info flags, which is how the cart knows.
+Dawn and the WebGPU host code are not inside the core: they are in a directory,
+`wasmcart_libretro_wgpu/`, that must sit in the same directory as
+`wasmcart_libretro.so`. If the core is reached through a symlink (Batocera links
+`/usr/lib/libretro/wasmcart_libretro.so` to the real file under `/userdata`), the
+directory goes beside the real file. `WASMCART_WGPU_DIR=<dir>` in the environment
+points the core somewhere else. The directory holds `dawn.node` and
+`libwebgpu_dawn.so` from [native-dawn](https://github.com/monteslu/native-dawn)
+0.1.3, wasmcart-native's `wgpu_bridge.cjs`, and wasmcart's `src/wgpu` JavaScript.
 
-Engines that can build both backends into one cart are the way to ship one
-`.wasc` that runs here and on WebGPU hosts.
+Which GPU API a cart gets:
+
+| Cart | `wasmcart_libretro_wgpu/` present and Dawn finds a Vulkan adapter | Otherwise |
+|------|------|------|
+| GL only | GL | GL |
+| GL + WebGPU (dual) | WebGPU | GL (the log says why) |
+| WebGPU only | WebGPU | refused at load, with the reason on screen |
+
+The log (RetroArch's, and `wasmcart.log` beside the cart) says which one was
+picked and the adapter name (`WebGPU on <adapter>`), or why there is no WebGPU.
+`WASMCART_NO_WGPU=1` in the environment makes the core act as a host without WebGPU.
+
+Platforms: the Linux x86_64 and aarch64 release tarballs include
+`wasmcart_libretro_wgpu/`. The macOS, Windows and Android cores ship without
+it and run carts on GL only (dual carts on GL; WebGPU-only carts are refused).
+
+Building it: point CMake at native-dawn's release archive for the platform and at
+wasmcart's `src/wgpu`; `deps/wasmcart-native/scripts/fetch-wgpu-deps.sh` fetches both
+(native-dawn by pinned sha256):
+
+```bash
+NATIVE_DAWN_VERSION=0.1.3 WASMCART_VERSION=0.32.0 \
+  sh deps/wasmcart-native/scripts/fetch-wgpu-deps.sh linux-x64 deps/wgpu
+cmake -B build -DWASMCART_WGPU_JS_DIR=$PWD/deps/wgpu/wasmcart/src/wgpu \
+               -DNATIVE_DAWN_DIR=$PWD/deps/wgpu/native-dawn
+cmake --build build    # build/wasmcart_libretro.so + build/wasmcart_libretro_wgpu/
+```
 
 ## Core Options
 
