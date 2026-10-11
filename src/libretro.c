@@ -940,6 +940,11 @@ static void present_wgpu_frame(void) {
 
 // ─── Run frame ──────────────────────────────────────────────────────────────
 
+// Time spent in the frontend's callbacks this frame, for the performance log:
+// RetroArch can block in them (audio sync waiting for its queue to drain,
+// video_cb on a swap), which the cart's own times do not show.
+static struct { double video, audio, input; unsigned samples; } fe_t;
+#define FE_CALL(slot, call) do { double fe_t0_ = perf_now_ms(); call; fe_t.slot += perf_now_ms() - fe_t0_; } while (0)
 static void run_frame(double* delta_out);
 static void perf_frame(double t_enter, double t_exit, double delta_ms);
 #ifdef _WIN32
@@ -961,6 +966,7 @@ static double perf_now_ms(void) {
 void retro_run(void) {
     if (!perf_log_on) { run_frame(NULL); return; }
     double delta = 0, t0 = perf_now_ms();
+    memset(&fe_t, 0, sizeof fe_t);
     run_frame(&delta);
     perf_frame(t0, perf_now_ms(), delta);
 }
@@ -977,7 +983,7 @@ static void run_frame(double* delta_out) {
             glViewport(0, 0, cart_w, cart_h);
             glClearColor(0, 0, 0, 1);
             glClear(GL_COLOR_BUFFER_BIT);
-            video_cb(RETRO_HW_FRAME_BUFFER_VALID, cart_w, cart_h, 0);
+            FE_CALL(video, video_cb(RETRO_HW_FRAME_BUFFER_VALID, cart_w, cart_h, 0));
         }
         return;
     }
@@ -1003,7 +1009,7 @@ static void run_frame(double* delta_out) {
     rumble_tick();
 
     // 1. Poll input
-    input_poll_cb();
+    FE_CALL(input, input_poll_cb());
 
     // 2. Translate RetroArch input → wasmcart pads
     wc_pad_t pads[WC_MAX_PADS];
@@ -1214,8 +1220,8 @@ static void run_frame(double* delta_out) {
         // The cart's ARGB8888 framebuffer is XRGB8888 to libretro as it is.
         uint32_t fb_w, fb_h;
         const uint8_t* fb = wc_host_get_framebuffer(host, &fb_w, &fb_h);
-        if (fb && fb_w > 0 && fb_h > 0) video_cb(fb, fb_w, fb_h, (size_t)fb_w * 4);
-        else video_cb(NULL, cart_w, cart_h, 0);
+        if (fb && fb_w > 0 && fb_h > 0) FE_CALL(video, video_cb(fb, fb_w, fb_h, (size_t)fb_w * 4));
+        else FE_CALL(video, video_cb(NULL, cart_w, cart_h, 0));
     } else if (hw_render.get_current_framebuffer) {
         uintptr_t ra_fbo = hw_render.get_current_framebuffer();
 
@@ -1278,13 +1284,14 @@ static void run_frame(double* delta_out) {
         save_cart_gl_state();
         reset_gl_for_retroarch();
 
-        video_cb(RETRO_HW_FRAME_BUFFER_VALID, blit_w, blit_h, 0);
+        FE_CALL(video, video_cb(RETRO_HW_FRAME_BUFFER_VALID, blit_w, blit_h, 0));
     }
 
     // 6. Send audio
     uint32_t num_frames;
     bool is_f32;
     const void* audio = wc_host_get_audio(host, &num_frames, &is_f32);
+    fe_t.samples += num_frames;
     if (num_frames > 0 && audio_batch_cb) {
         if (is_f32) {
             // Convert F32 → S16 (libretro only accepts int16)
@@ -1300,9 +1307,9 @@ static void run_frame(double* delta_out) {
                 if (s < -1.0f) s = -1.0f;
                 audio_conv_buf[i] = (int16_t)(s * 32767.0f);
             }
-            audio_batch_cb(audio_conv_buf, num_frames);
+            FE_CALL(audio, audio_batch_cb(audio_conv_buf, num_frames));
         } else {
-            audio_batch_cb((const int16_t*)audio, num_frames);
+            FE_CALL(audio, audio_batch_cb((const int16_t*)audio, num_frames));
         }
     }
 }
@@ -1416,6 +1423,8 @@ static struct {
     // WebGPU carts
     double w_cart, w_queue, w_wait, w_wait_max, w_upload, w_latency;
     unsigned w_shown;
+    // the frontend's callbacks (fe_t)
+    double fe_video, fe_video_max, fe_audio, fe_audio_max, fe_input, samples;
     double cpu_main0, cpu_all0;
 } PS;
 /* CPU time of the calling thread (1) or the whole process (0); 0 where the clocks are missing */
@@ -1483,6 +1492,12 @@ static void perf_frame(double t_enter, double t_exit, double delta_ms) {
     if (delta_ms > PS.dt_max) PS.dt_max = delta_ms;
     PS.gc_ms += pr.gc_ms;
     PS.gc_count += pr.gc_count;
+    PS.fe_video += fe_t.video;
+    if (fe_t.video > PS.fe_video_max) PS.fe_video_max = fe_t.video;
+    PS.fe_audio += fe_t.audio;
+    if (fe_t.audio > PS.fe_audio_max) PS.fe_audio_max = fe_t.audio;
+    PS.fe_input += fe_t.input;
+    PS.samples += fe_t.samples;
     if (host && wc_host_uses_wgpu(host)) {
         PS.w_cart += wgpu_t.cart;
         PS.w_queue += wgpu_t.queue;
@@ -1504,6 +1519,14 @@ static void perf_frame(double t_enter, double t_exit, double delta_ms) {
                   t, PS.frames / secs, PS.run_sum / n, PS.run_max, (PS.run_sum - PS.gl_sum) / n, PS.gl_sum / n, PS.gl_calls / n,
                   PS.slowest_gl ? PS.slowest_gl : "-", PS.slowest_gl_ms, PS.gap_sum / n, PS.gap_max, PS.dt_sum / n, PS.dt_max,
                   PS.dt_sum / n / (1000.0 / 60.0), PS.gc_ms, PS.gc_count, pr.heap_used_mb, main_cpu / secs, bg_cpu / secs);
+        {
+            const wc_cart_info_t* ci = host ? wc_host_get_cart_info(host) : NULL;
+            double rate = ci && ci->audio_sample_rate ? ci->audio_sample_rate : 48000.0;
+            perf_line("wasmcart perf: t=%.0f frontend calls | video_cb %.1f max %.1f | audio_batch %.1f max %.1f "
+                      "(%.0f samples a frame, %.0f a frame at %.0f Hz / 60) | input_poll %.1f",
+                      t, PS.fe_video / n, PS.fe_video_max, PS.fe_audio / n, PS.fe_audio_max, PS.samples / n,
+                      rate / 60.0, rate, PS.fe_input / n);
+        }
         if (host && wc_host_uses_wgpu(host)) {
             double sh = PS.w_shown ? PS.w_shown : 1;
             perf_line("wasmcart perf: t=%.0f webgpu | cart %.1f (wc_render + glue) | queue %.1f | wait %.1f max %.1f | "
