@@ -103,8 +103,9 @@ wasmcart has an optional WebGPU tier ([docs/webgpu.md](https://github.com/wasmca
 libretro has no WebGPU hardware context, so the core makes its own WebGPU device
 through [Dawn](https://dawn.googlesource.com/dawn) (Vulkan on Linux), independent
 of RetroArch's video driver, which stays `gl`. The cart renders on that device,
-and each frame is copied into RetroArch's GL framebuffer, so shaders, overlays,
-screenshots and recording work as for a GL cart.
+on the same GPU as RetroArch's GL context, and each frame is drawn into
+RetroArch's GL framebuffer, so shaders, overlays, screenshots and recording work
+as for a GL cart.
 
 Dawn and the WebGPU host code are not inside the core: they are in a directory,
 `wasmcart_libretro_wgpu/`, that must sit in the same directory as
@@ -113,7 +114,7 @@ Dawn and the WebGPU host code are not inside the core: they are in a directory,
 directory goes beside the real file. `WASMCART_WGPU_DIR=<dir>` in the environment
 points the core somewhere else. The directory holds `dawn.node` and
 `libwebgpu_dawn.so` from [native-dawn](https://github.com/monteslu/native-dawn)
-0.1.3, wasmcart-native's `wgpu_bridge.cjs`, and wasmcart's `src/wgpu` JavaScript.
+0.1.4, wasmcart-native's `wgpu_bridge.cjs`, and wasmcart's `src/wgpu` JavaScript.
 
 Which GPU API a cart gets:
 
@@ -129,12 +130,30 @@ On load the core shows which one a cart that imports WebGPU got (`WebGPU on
 to GL, or `WASMCART_NO_WGPU=1` in the environment, makes the core act as a host
 without WebGPU.
 
-The frame copy is pipelined: frame N's copy is queued as soon as it is rendered,
-and frame N-1, copied while N rendered, is drawn into RetroArch's framebuffer
-straight from the mapped buffer. The picture is one frame behind the cart, and
-the core waits only when the GPU has not finished the previous frame by the
-next `retro_run`. A lost device (a driver reset) stops the cart with an
+The GPU: once RetroArch's GL context exists, the core asks it which GPU it is
+on (GL_EXT_memory_object's device UUID, matched against Vulkan's devices), and
+if Dawn took another one (a machine with two GPUs) the cart is loaded again on
+the GL context's GPU before it starts. The log says so.
+
+The frame never leaves the GPU where the GL context allows it (Linux, a GL with
+GL_EXT_memory_object_fd and GL_EXT_semaphore_fd, and GL and Vulkan from the
+same driver: Mesa's radeonsi and RADV, for example): the core allocates the
+frame's memory with Vulkan on that GPU and both Dawn and GL import it, Dawn
+copies the cart's frame into it, and GL draws it into RetroArch's framebuffer
+after waiting, on the GPU, for Dawn's copy (semaphores both ways). The picture
+is the frame the cart just rendered, and the CPU never waits for the GPU. The
+log says `WebGPU frames reach GL on the GPU, zero-copy`.
+
+Otherwise the frame is read back, and the log and an on-screen message say
+`WebGPU frames reach GL by READBACK` with the reason: a pipelined copy into a
+mapped buffer (frame N's copy queued as soon as it is rendered, frame N-1
+drawn from the mapped buffer), one frame behind the cart, about 8 MB each way
+per frame at 1080p. A lost device (a driver reset) stops the cart with an
 on-screen message; Restart Content starts it again.
+
+Dawn's command validation is off (it costs CPU on every call;
+`WASMCART_WGPU_VALIDATION=1` turns it on), and the calls a frame makes most go
+from the cart straight to Dawn's C API (wasmcart-native `src/wgpu_imports.cpp`).
 
 The WebGPU device follows the wasmcart WebGPU tier: the adapter is requested in
 WebGPU compatibility mode (the tier's floor, so a cart cannot depend on more
@@ -152,7 +171,7 @@ wasmcart's `src/wgpu`; `deps/wasmcart-native/scripts/fetch-wgpu-deps.sh` fetches
 (native-dawn by pinned sha256):
 
 ```bash
-NATIVE_DAWN_VERSION=0.1.3 WASMCART_VERSION=0.32.0 \
+NATIVE_DAWN_VERSION=0.1.4 WASMCART_VERSION=0.34.0 \
   sh deps/wasmcart-native/scripts/fetch-wgpu-deps.sh linux-x64 deps/wgpu
 cmake -B build -DWASMCART_WGPU_JS_DIR=$PWD/deps/wgpu/wasmcart/src/wgpu \
                -DNATIVE_DAWN_DIR=$PWD/deps/wgpu/native-dawn
@@ -164,7 +183,7 @@ cmake --build build    # build/wasmcart_libretro.so + build/wasmcart_libretro_wg
 - **Internal Resolution**: 270p, 360p, 640x480, 540p, 720p, 1080p, 1440p, 4K — passed to the cart as its preferred resolution (`wc_host_info_t`); a cart that follows it (cartwheel games do) renders the largest frame of its own aspect that fits, and RetroArch shows it at that aspect. Applies when content loads or restarts (Quick Menu → Restart Content)
 - **Runtime Code Generation**: Enabled (default) / Disabled, applied when content loads (`WASMCART_JIT=0` in the environment also turns it off). A cart that asks for it while it is off runs without it, and the core shows an on-screen notice on its first request saying so.
 - **GPU API**: Auto (WebGPU when available, the default) / GL — which API a cart that imports both GL and WebGPU runs on (see "WebGPU carts"). With GL, a WebGPU-only cart does not start, and the core says so on screen. Applies when content loads or restarts.
-- **Performance Log**: Disabled (default) / Enabled (`WASMCART_PERF_LOG=1` too) — once a second, the frame rate and where each frame's time went, written to RetroArch's log and to `wasmcart-perf.log` in the save directory, with the time spent in the frontend's callbacks (`video_cb`, `audio_batch` with the samples pushed per frame against the cart's rate / 60, `input_poll`), where RetroArch can block. A WebGPU cart gets a second line: the cart's `wc_render` (with the WebGPU glue), queueing the frame's copy, the time waiting for the frame shown, the GL upload, and the latency from queue to mapped (the GPU's frame and the copy).
+- **Performance Log**: Disabled (default) / Enabled (`WASMCART_PERF_LOG=1` too) — once a second, the frame rate and where each frame's time went, written to RetroArch's log and to `wasmcart-perf.log` in the save directory, with the time spent in the frontend's callbacks (`video_cb`, `audio_batch` with the samples pushed per frame against the cart's rate / 60, `input_poll`), where RetroArch can block. A WebGPU cart gets a second line, `webgpu shared` (the cart's `wc_render`, the GPU copy into the shared texture, GL drawing it) or `webgpu readback` (the cart's `wc_render`, queueing the frame's copy, the time waiting for the frame shown, the GL upload, and the latency from queue to mapped: the GPU's frame and the copy). The cart's compiled code is kept between runs in `wasmcart/code` in the save directory (the next start runs the code V8 optimized last time from its first frame).
 
 ## Tests (Linux)
 

@@ -33,6 +33,10 @@ add_library(wasmcart_libretro SHARED
     ${WC_NATIVE}/src/cart_host.cpp
     ${WC_NATIVE}/src/gl_imports.cpp
     ${WC_NATIVE}/src/gl_procs.c
+    ${WC_NATIVE}/src/gl_track.c
+    ${WC_NATIVE}/src/wgpu_imports.cpp
+    ${WC_NATIVE}/src/wgpu_gl_share.cpp
+    ${WC_NATIVE}/src/code_cache.cpp
     ${WC_NATIVE}/src/asset_loader.c
     ${WC_NATIVE}/deps/miniz.c
     ${WC_NATIVE}/deps/cJSON.c
@@ -96,6 +100,11 @@ target_compile_definitions(wasmcart_libretro PRIVATE WASMCART_WGPU_BESIDE_MODULE
 set(WASMCART_WGPU_JS_DIR "" CACHE PATH "wasmcart's src/wgpu directory (host.js and the generated glue)")
 set(NATIVE_DAWN_DIR "" CACHE PATH "native-dawn release archive for this platform, unpacked")
 if(WASMCART_WGPU_JS_DIR AND NATIVE_DAWN_DIR)
+    # the hot imports call Dawn's C API, and the frames are shared with GL
+    # (wgpu_imports.cpp, wgpu_gl_share.cpp): Dawn's headers here (and on Linux
+    # Vulkan's), its library resolved at run time from wasmcart_libretro_wgpu/
+    target_include_directories(wasmcart_libretro PRIVATE "${NATIVE_DAWN_DIR}/include")
+    target_compile_definitions(wasmcart_libretro PRIVATE WASMCART_WGPU_NATIVE)
     set(WGPU_OUT "$<TARGET_FILE_DIR:wasmcart_libretro>/wasmcart_libretro_wgpu")
     file(WRITE "${CMAKE_BINARY_DIR}/wgpu-package.json" "{ \"type\": \"module\" }\n")
     if(WIN32)

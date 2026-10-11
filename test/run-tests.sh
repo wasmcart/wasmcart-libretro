@@ -48,7 +48,13 @@
 #    Restart Content and is refused with the reason on screen when WebGPU is
 #    off. A cart that resizes its surface is followed (SET_GEOMETRY), a lost
 #    device is said on screen and the core keeps running, and the
-#    performance log has its WebGPU line.
+#    performance log has its WebGPU line. All of it twice: the frames shared
+#    with GL on the GPU (zero-copy, where the GL context and Vulkan driver
+#    allow: Linux, GL_EXT_memory_object_fd + GL_EXT_semaphore_fd, the same
+#    driver; else the core says why and reads them back), and read back
+#    (WASMCART_NO_WGPU_SHARE=1). Which path ran is printed, and a GL that has
+#    the sharing extensions must get the shared path. Dawn's validation is on
+#    (WASMCART_WGPU_VALIDATION=1), so an invalid call fails the run.
 set -u
 BUILD=$(cd "${1:?build dir}" && pwd); LUA=${2:?wasmcart-lua cart}; JIT=${3:?JIT engine cart}
 FE="$BUILD/lr_frontend"; CORE="$BUILD/wasmcart_libretro.so"
@@ -132,11 +138,25 @@ if [ ! -f "$BUILD/wasmcart_libretro_wgpu/wgpu_bridge.cjs" ]; then
   fail=$((fail + 1))
 else
 for c in dualgpu wgpucart wgpuedges wgpulost; do cp "$WFX/$c.wasc" "$WORK/$c.wasc"; done
+export WASMCART_WGPU_VALIDATION=1
+for path in shared readback; do
+if [ $path = readback ]; then export WASMCART_NO_WGPU_SHARE=1; else unset WASMCART_NO_WGPU_SHARE; fi
+echo "-- webgpu, frames $path"
 run "webgpu: dual cart runs on WebGPU (green)"   "$WORK/dualgpu.wasc" --frames 30 --expect-video hw --expect-pixel 64,48,00ff00 \
     --expect-message "WebGPU on "
 grep -q "wasmcart: WebGPU cart, on " "$WORK/out.txt" \
   && { echo "ok   webgpu: the log names the adapter"; pass=$((pass + 1)); } \
   || { echo "FAIL webgpu: the log names the adapter"; fail=$((fail + 1)); }
+# which path ran: the readback says why; a GL with the sharing extensions
+# (and so no "has no GL_EXT_..." reason) must share
+used=$(grep -o "WebGPU frames reach GL [^:]*\(: .*\)\?" "$WORK/wasmcart.log" 2>/dev/null | tail -1)
+case "$path:$used" in
+  "shared:WebGPU frames reach GL on the GPU, zero-copy"*) echo "ok   webgpu: frames shared with GL (zero-copy)"; pass=$((pass + 1)) ;;
+  "shared:WebGPU frames reach GL by READBACK"*"has no GL_EXT_"*|"shared:WebGPU frames reach GL by READBACK"*"only implemented on Linux"*)
+    echo "ok   webgpu: frames read back: ${used#*): }"; pass=$((pass + 1)) ;;
+  "readback:WebGPU frames reach GL by READBACK"*"WASMCART_NO_WGPU_SHARE"*) echo "ok   webgpu: frames read back (WASMCART_NO_WGPU_SHARE)"; pass=$((pass + 1)) ;;
+  *) echo "FAIL webgpu: frames $path: the core logged '$used'"; fail=$((fail + 1)) ;;
+esac
 run "webgpu: GPU API GL runs the dual cart on GL (red)" "$WORK/dualgpu.wasc" --frames 30 --option wasmcart_gpu_api=gl \
     --expect-video hw --expect-pixel 64,48,ff0000 --expect-message "GL (no WebGPU: WebGPU is turned off"
 run "webgpu: WebGPU-only cart, triangle"         "$WORK/wgpucart.wasc" --frames 30 --expect-pixel 128,110,ff8040
@@ -153,9 +173,12 @@ run "webgpu: a cart that resizes its surface"    "$WORK/wgpuedges.wasc" --frames
 run "webgpu: a lost device is said on screen"    "$WORK/wgpulost.wasc" --frames 40 --expect-message "The GPU device was lost"
 # (the log goes to the frontend's save directory; lr_frontend has none, so the working directory)
 ( cd "$WORK" && WASMCART_PERF_LOG=1 timeout -s KILL 180 "$FE" "$CORE" "$WORK/wgpucart.wasc" --frames 6000 > "$WORK/out.txt" 2>&1 )
-grep -q "webgpu | cart .* latency .* shown" "$WORK/wasmcart-perf.log" 2>/dev/null \
+grep -qE "webgpu (shared|readback) \| cart .* shown" "$WORK/wasmcart-perf.log" 2>/dev/null \
   && { echo "ok   webgpu: the performance log has its WebGPU line"; pass=$((pass + 1)); } \
   || { echo "FAIL webgpu: the performance log has its WebGPU line"; fail=$((fail + 1)); }
+rm -f "$WORK/wasmcart-perf.log"
+done
+unset WASMCART_NO_WGPU_SHARE WASMCART_WGPU_VALIDATION
 fi
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

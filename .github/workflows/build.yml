@@ -12,9 +12,12 @@ env:
   # WebGPU support for the Linux cores (wasmcart_libretro_wgpu/ beside the
   # .so): Dawn from native-dawn's release (sha256 pinned in
   # deps/wasmcart-native/scripts/fetch-wgpu-deps.sh) and wasmcart's WebGPU
-  # host JavaScript from its npm package.
-  NATIVE_DAWN_VERSION: 0.1.3
-  WASMCART_VERSION: 0.32.0
+  # host JavaScript from its package: the npm pack tarball on its GitHub
+  # release (the bytes npm publishes). native-dawn 0.1.4: objectHandle and
+  # the shared-texture features the zero-copy present needs.
+  NATIVE_DAWN_VERSION: 0.1.4
+  WASMCART_VERSION: 0.34.0
+  WASMCART_SPEC: https://github.com/wasmcart/wasmcart/releases/download/v0.34.0/wasmcart-0.34.0.tgz
 
 jobs:
   build-linux-x86_64:
@@ -24,7 +27,7 @@ jobs:
         with:
           submodules: recursive
       - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y cmake g++
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ libvulkan-dev
       - name: Download libnode
         run: |
           mkdir -p deps/libnode
@@ -55,7 +58,7 @@ jobs:
         with:
           submodules: recursive
       - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y cmake g++
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ libvulkan-dev
       - name: Download libnode
         run: |
           mkdir -p deps/libnode

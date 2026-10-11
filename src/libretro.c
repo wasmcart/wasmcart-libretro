@@ -153,6 +153,11 @@ static bool gl_refused = false;
 static bool first_frame = true;
 // A WebGPU cart's frame has been shown (present_wgpu_frame).
 static bool wgpu_shown = false;
+// Its frames reach GL without leaving the GPU (wc_host_wgpu_gl_share); else
+// through the readback (a mapped copy, a frame late).
+static bool wgpu_gl_shared = false;
+// The GPU of the frontend's GL context, which Dawn is pinned to (0: unknown).
+static uint32_t gl_gpu_vendor = 0, gl_gpu_device = 0;
 // The player was told this cart's WebGPU device is lost.
 static bool wgpu_lost_told = false;
 static uint32_t cart_w = 0, cart_h = 0;
@@ -201,31 +206,37 @@ static struct {
     bool saved;
 } cart_gl_state = {0};
 
+// Read from the copy wasmcart-native's GL layer keeps as the state is set
+// (gl_track.c): no glGet, each of which is a full sync with Mesa's GL thread
+// (about 20 of them a frame before). The copy starts from the real state at
+// context reset (wc_gl_track_reset).
 static void save_cart_gl_state(void) {
-    glGetIntegerv(GL_CURRENT_PROGRAM, &cart_gl_state.program);
-    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &cart_gl_state.vao);
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &cart_gl_state.fbo);
-    glGetIntegerv(GL_ACTIVE_TEXTURE, &cart_gl_state.active_tex);
-    glGetIntegerv(GL_TEXTURE_BINDING_2D, &cart_gl_state.tex_2d);
-    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &cart_gl_state.array_buf);
-    glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &cart_gl_state.elem_buf);
-    glGetIntegerv(GL_VIEWPORT, cart_gl_state.viewport);
-    cart_gl_state.blend = glIsEnabled(GL_BLEND);
-    cart_gl_state.depth_test = glIsEnabled(GL_DEPTH_TEST);
-    cart_gl_state.scissor_test = glIsEnabled(GL_SCISSOR_TEST);
-    cart_gl_state.stencil_test = glIsEnabled(GL_STENCIL_TEST);
-    cart_gl_state.cull_face = glIsEnabled(GL_CULL_FACE);
-    cart_gl_state.dither = glIsEnabled(GL_DITHER);
-    glGetIntegerv(GL_BLEND_SRC_RGB, &cart_gl_state.blend_src_rgb);
-    glGetIntegerv(GL_BLEND_DST_RGB, &cart_gl_state.blend_dst_rgb);
-    glGetIntegerv(GL_BLEND_SRC_ALPHA, &cart_gl_state.blend_src_a);
-    glGetIntegerv(GL_BLEND_DST_ALPHA, &cart_gl_state.blend_dst_a);
-    glGetIntegerv(GL_BLEND_EQUATION_RGB, &cart_gl_state.blend_eq_rgb);
-    glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &cart_gl_state.blend_eq_a);
-    glGetBooleanv(GL_DEPTH_WRITEMASK, &cart_gl_state.depth_mask);
-    glGetBooleanv(GL_COLOR_WRITEMASK, cart_gl_state.color_mask);
-    glGetIntegerv(GL_STENCIL_WRITEMASK, &cart_gl_state.stencil_mask);
-    glGetFloatv(GL_COLOR_CLEAR_VALUE, cart_gl_state.clear_color);
+    wc_gl_tracked_state t;
+    wc_gl_track_get(&t);
+    cart_gl_state.program = t.program;
+    cart_gl_state.vao = t.vao;
+    cart_gl_state.fbo = t.fbo;
+    cart_gl_state.active_tex = t.active_tex;
+    cart_gl_state.tex_2d = t.tex_2d;
+    cart_gl_state.array_buf = t.array_buf;
+    cart_gl_state.elem_buf = t.elem_buf;
+    memcpy(cart_gl_state.viewport, t.viewport, sizeof cart_gl_state.viewport);
+    cart_gl_state.blend = t.blend;
+    cart_gl_state.depth_test = t.depth_test;
+    cart_gl_state.scissor_test = t.scissor_test;
+    cart_gl_state.stencil_test = t.stencil_test;
+    cart_gl_state.cull_face = t.cull_face;
+    cart_gl_state.dither = t.dither;
+    cart_gl_state.blend_src_rgb = t.blend_src_rgb;
+    cart_gl_state.blend_dst_rgb = t.blend_dst_rgb;
+    cart_gl_state.blend_src_a = t.blend_src_a;
+    cart_gl_state.blend_dst_a = t.blend_dst_a;
+    cart_gl_state.blend_eq_rgb = t.blend_eq_rgb;
+    cart_gl_state.blend_eq_a = t.blend_eq_a;
+    cart_gl_state.depth_mask = t.depth_mask;
+    memcpy(cart_gl_state.color_mask, t.color_mask, sizeof cart_gl_state.color_mask);
+    cart_gl_state.stencil_mask = t.stencil_mask;
+    memcpy(cart_gl_state.clear_color, t.clear_color, sizeof cart_gl_state.clear_color);
     cart_gl_state.saved = true;
 }
 
@@ -576,6 +587,54 @@ static void announce_cart_size(uint32_t w, uint32_t h) {
     wc_log("wasmcart: SET_SYSTEM_AV_INFO %ux%u (exceeded declared max)\n", w, h);
 }
 
+static bool load_cart(void);
+static void create_host(void);
+
+// A WebGPU cart, now that the frontend's GL context exists (before wc_init):
+// Dawn must be on that context's GPU, so on a machine with two the cart is
+// loaded again on the right one; then its frames are shared with GL
+// (zero-copy) where the platform and drivers allow, else read back. Which
+// path runs is logged, and said on screen when it is the readback.
+static void wgpu_with_gl(void) {
+    char why[300] = "";
+    uint32_t gv = 0, gd = 0, wv = 0, wd = 0;
+    if (wc_gl_context_gpu(host, &gv, &gd, why, sizeof why) == 0) {
+        if (wc_host_wgpu_adapter_ids(host, &wv, &wd) == 0 && (wv != gv || wd != gd) && !(gl_gpu_vendor == gv && gl_gpu_device == gd)) {
+            wc_log("wasmcart: WebGPU took GPU %04x:%04x, the frontend's GL is on %04x:%04x: loading the cart again on the GL GPU\n",
+                   wv, wd, gv, gd);
+            gl_gpu_vendor = gv;
+            gl_gpu_device = gd;
+            wc_host_exit_v8();
+            wc_host_destroy(host);
+            host = NULL;
+            create_host();
+            if (!host || !load_cart()) {
+                notify("The cart could not be loaded again on the frontend's GPU.", RETRO_LOG_ERROR, 10000);
+                if (host) { wc_host_destroy(host); host = NULL; }
+                return;
+            }
+            wc_host_set_gl_loader(host, (wc_gl_get_proc_fn)hw_render.get_proc_address);
+        }
+        gl_gpu_vendor = gv;
+        gl_gpu_device = gd;
+    } else {
+        wc_log("wasmcart: WebGPU: which GPU the frontend's GL is on is unknown (%s); WebGPU stays on %s\n",
+               why, wc_host_wgpu_adapter(host));
+    }
+    const char* off = getenv("WASMCART_NO_WGPU_SHARE");  // tests: the readback path
+    why[0] = 0;
+    if (off && *off && *off != '0') snprintf(why, sizeof why, "WASMCART_NO_WGPU_SHARE is set");
+    wgpu_gl_shared = !why[0] && wc_host_wgpu_gl_share(host, why, sizeof why) == 0;
+    if (wgpu_gl_shared) {
+        wc_log("wasmcart: WebGPU frames reach GL on the GPU, zero-copy (shared memory), the same frame\n");
+    } else {
+        wc_log("wasmcart: WebGPU frames reach GL by READBACK (GPU -> CPU -> GPU, one frame late): %s\n", why);
+        char msg[400];
+        snprintf(msg, sizeof msg, "WebGPU frames are copied through the CPU (slower): %s", why);
+        notify(msg, RETRO_LOG_WARN, 6000);
+    }
+}
+
 // GL is available: finish the cart's deferred init (wc_init), size the
 // redirect target to what it settled on and tell the frontend.
 static void finish_cart_init(void) {
@@ -591,12 +650,17 @@ static void finish_cart_init(void) {
     // points from the cart's side; the core's present (the redirect FBO and
     // the frame upload) needs them.
     if (wc_host_uses_wgpu(host)) wc_gl_procs_load((void*)hw_render.get_proc_address);
+    if (wc_host_uses_wgpu(host)) wgpu_with_gl();
+    if (!host) return;
 
     // Create redirect FBO with depth+stencil BEFORE cart init.
     // Three.js needs depth testing, Ganesh needs stencil.
     // RetroArch's hw_render FBO may not have these attachments.
     extern void wc_gl_setup_redirect(uint32_t w, uint32_t h);
     wc_gl_setup_redirect(pref_width, pref_height);
+    // the GL state save / restore keeps a copy as it is set: start it from
+    // what the frontend's context really has
+    wc_gl_track_reset();
 
     sram_to_cart();  // the frontend's .srm (copied in after load) before wc_init
     wc_host_finish_init(host);
@@ -676,6 +740,9 @@ static void on_context_reset(void) {
 
 static void on_context_destroy(void) {
     if (log_cb) log_cb(RETRO_LOG_INFO, "wasmcart: GL context destroyed\n");
+    // the shared frame's GL half goes with the context (the next reset shares again)
+    if (host && wgpu_gl_shared) wc_host_wgpu_gl_unshare(host);
+    wgpu_gl_shared = false;
 }
 
 // ─── Init / Deinit ──────────────────────────────────────────────────────────
@@ -743,6 +810,18 @@ static bool load_cart(void) {
     opts.defer_init = true;  // always defer — we'll finish in context_reset or first frame
     opts.save_data = sram;
     opts.save_data_size = sram ? sram_size : 0;
+    // A WebGPU cart: its frames shared with the frontend's GL where they can
+    // be, on the GL context's GPU once that is known (finish_cart_init).
+    opts.wgpu_gl_share = true;
+    opts.wgpu_adapter_vendor = gl_gpu_vendor;
+    opts.wgpu_adapter_device = gl_gpu_device;
+    // the cart's compiled code, kept between runs in the frontend's save directory
+    static char code_cache[1024];
+    const char* save_dir = NULL;
+    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &save_dir) && save_dir && *save_dir) {
+        snprintf(code_cache, sizeof code_cache, "%s/wasmcart/code", save_dir);
+        opts.code_cache_dir = code_cache;
+    }
 
     int rc = wc_host_load_file(host, game_path, &opts);
     if (rc != 0) {
@@ -913,6 +992,35 @@ static void present_wgpu_frame(void) {
         return;
     }
     double t0 = perf_now_ms();
+    if (wgpu_gl_shared) {
+        // This frame, copied on the GPU into the texture GL shares; GL waits for the copy.
+        wc_wgpu_gl_frame_t g;
+        char why[300] = "";
+        int r = wc_host_wgpu_gl_frame(host, &g, why, sizeof why);
+        double t1s = perf_now_ms();
+        wgpu_t.queue = t1s - t0;
+        wgpu_t.wait = 0;
+        wgpu_t.latency = 0;
+        wgpu_t.shown = r == 0;
+        if (r == 0) {
+            if (g.width != cart_w || g.height != cart_h) {
+                extern void wc_gl_setup_redirect(uint32_t w, uint32_t h);
+                cart_w = g.width;
+                cart_h = g.height;
+                wc_gl_setup_redirect(g.width, g.height);
+                announce_cart_size(g.width, g.height);
+            }
+            extern void wc_gl_present_texture(uint32_t tex, uint32_t w, uint32_t h, int bgra);
+            wc_gl_present_texture(g.texture, g.width, g.height, g.bgra);
+            wc_host_wgpu_gl_frame_done(host);
+            wgpu_shown = true;
+            wgpu_t.upload = perf_now_ms() - t1s;
+            return;
+        }
+        if (r == 1) return;  // no frame yet
+        wgpu_gl_shared = false;
+        wc_log("wasmcart: WebGPU frame sharing failed (%s); frames reach GL by READBACK from now on\n", why);
+    }
     wc_host_wgpu_frame_queue(host);
     double t1 = perf_now_ms();
     wc_wgpu_frame_t f;
@@ -1529,10 +1637,14 @@ static void perf_frame(double t_enter, double t_exit, double delta_ms) {
         }
         if (host && wc_host_uses_wgpu(host)) {
             double sh = PS.w_shown ? PS.w_shown : 1;
-            perf_line("wasmcart perf: t=%.0f webgpu | cart %.1f (wc_render + glue) | queue %.1f | wait %.1f max %.1f | "
-                      "upload %.1f | latency %.1f (queue to mapped: GPU frame + copy) | shown %u of %u frames",
-                      t, PS.w_cart / n, PS.w_queue / n, PS.w_wait / n, PS.w_wait_max, PS.w_upload / sh, PS.w_latency / sh,
-                      PS.w_shown, PS.frames);
+            if (wgpu_gl_shared)
+                perf_line("wasmcart perf: t=%.0f webgpu shared | cart %.1f (wc_render + glue) | copy %.1f | draw %.1f | shown %u of %u frames",
+                          t, PS.w_cart / n, PS.w_queue / n, PS.w_upload / sh, PS.w_shown, PS.frames);
+            else
+                perf_line("wasmcart perf: t=%.0f webgpu readback | cart %.1f (wc_render + glue) | queue %.1f | wait %.1f max %.1f | "
+                          "upload %.1f | latency %.1f (queue to mapped: GPU frame + copy) | shown %u of %u frames",
+                          t, PS.w_cart / n, PS.w_queue / n, PS.w_wait / n, PS.w_wait_max, PS.w_upload / sh, PS.w_latency / sh,
+                          PS.w_shown, PS.frames);
         }
         memset(&PS, 0, sizeof PS);
         PS.cpu_main0 = cm;
