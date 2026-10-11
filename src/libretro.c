@@ -898,11 +898,24 @@ void retro_unload_game(void) {
 // when the GPU has not finished N-1 by the next retro_run. The frame may be
 // a different size than wc_get_info said (the cart sizes its canvas itself);
 // the redirect target and the frontend follow it.
+// Per frame, for the performance log: the cart's wc_render (with the glue),
+// queueing the copy, waiting for the frame to show, the GL upload, and the
+// latency of the frame shown (queue to mapped: GPU render + copy).
+static struct { double cart, queue, wait, upload, latency; bool shown; } wgpu_t;
+static double perf_now_ms(void);
 static void present_wgpu_frame(void) {
+    double t0 = perf_now_ms();
     wc_host_wgpu_frame_queue(host);
+    double t1 = perf_now_ms();
     wc_wgpu_frame_t f;
     // Nothing shown yet: wait for this very frame rather than show black.
-    if (wc_host_wgpu_frame_take(host, &f, wgpu_shown ? 1 : 0, 250) != 0) return;
+    int took = wc_host_wgpu_frame_take(host, &f, wgpu_shown ? 1 : 0, 250);
+    double t2 = perf_now_ms();
+    wgpu_t.queue = t1 - t0;
+    wgpu_t.wait = t2 - t1;
+    wgpu_t.shown = took == 0;
+    if (took != 0) return;
+    wgpu_t.latency = f.latency_ms;
     if (f.width != cart_w || f.height != cart_h) {
         extern void wc_gl_setup_redirect(uint32_t w, uint32_t h);
         cart_w = f.width;
@@ -914,6 +927,7 @@ static void present_wgpu_frame(void) {
     wc_gl_upload_frame(f.data, f.width, f.height, f.bytes_per_row / 4, f.bgra);
     wc_host_wgpu_frame_release(host);
     wgpu_shown = true;
+    wgpu_t.upload = perf_now_ms() - t2;
 }
 
 // ─── Run frame ──────────────────────────────────────────────────────────────
@@ -1165,7 +1179,9 @@ static void run_frame(double* delta_out) {
         wc_gl_rebind_redirect();
     }
     lr_update_input_devices();
+    double t_cart = perf_now_ms();
     wc_host_run_frame(host);
+    wgpu_t.cart = perf_now_ms() - t_cart;
     sram_from_cart();
     jit_notice_tick();
     lr_update_input_descriptors();
@@ -1379,6 +1395,9 @@ static struct {
     double run_sum, run_max, gl_sum, gap_sum, gap_max, dt_sum, dt_max, gc_ms, slowest_gl_ms;
     unsigned gl_calls, gc_count;
     const char* slowest_gl;
+    // WebGPU carts
+    double w_cart, w_queue, w_wait, w_wait_max, w_upload, w_latency;
+    unsigned w_shown;
     double cpu_main0, cpu_all0;
 } PS;
 /* CPU time of the calling thread (1) or the whole process (0); 0 where the clocks are missing */
@@ -1446,6 +1465,13 @@ static void perf_frame(double t_enter, double t_exit, double delta_ms) {
     if (delta_ms > PS.dt_max) PS.dt_max = delta_ms;
     PS.gc_ms += pr.gc_ms;
     PS.gc_count += pr.gc_count;
+    if (host && wc_host_uses_wgpu(host)) {
+        PS.w_cart += wgpu_t.cart;
+        PS.w_queue += wgpu_t.queue;
+        PS.w_wait += wgpu_t.wait;
+        if (wgpu_t.wait > PS.w_wait_max) PS.w_wait_max = wgpu_t.wait;
+        if (wgpu_t.shown) { PS.w_shown++; PS.w_upload += wgpu_t.upload; PS.w_latency += wgpu_t.latency; }
+    }
     double t = (t_enter - perf_t_start) / 1000.0;
     if (t < 30 && run + gap > 50)
         perf_line("wasmcart perf: slow frame t=%.2f frame %u: run %.1f (gl %.1f in %u calls, slowest %s %.1f) gap %.1f dt %.1f gc %.1f (%u)",
@@ -1460,6 +1486,13 @@ static void perf_frame(double t_enter, double t_exit, double delta_ms) {
                   t, PS.frames / secs, PS.run_sum / n, PS.run_max, (PS.run_sum - PS.gl_sum) / n, PS.gl_sum / n, PS.gl_calls / n,
                   PS.slowest_gl ? PS.slowest_gl : "-", PS.slowest_gl_ms, PS.gap_sum / n, PS.gap_max, PS.dt_sum / n, PS.dt_max,
                   PS.dt_sum / n / (1000.0 / 60.0), PS.gc_ms, PS.gc_count, pr.heap_used_mb, main_cpu / secs, bg_cpu / secs);
+        if (host && wc_host_uses_wgpu(host)) {
+            double sh = PS.w_shown ? PS.w_shown : 1;
+            perf_line("wasmcart perf: t=%.0f webgpu | cart %.1f (wc_render + glue) | queue %.1f | wait %.1f max %.1f | "
+                      "upload %.1f | latency %.1f (queue to mapped: GPU frame + copy) | shown %u of %u frames",
+                      t, PS.w_cart / n, PS.w_queue / n, PS.w_wait / n, PS.w_wait_max, PS.w_upload / sh, PS.w_latency / sh,
+                      PS.w_shown, PS.frames);
+        }
         memset(&PS, 0, sizeof PS);
         PS.cpu_main0 = cm;
         PS.cpu_all0 = ca;
