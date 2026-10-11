@@ -81,6 +81,45 @@ if(NOT MSVC)
     target_compile_options(wasmcart_libretro PRIVATE -Wno-unused-parameter)
 endif()
 
+# ─── WebGPU (wasmcart SPEC.md, "WebGPU") ─────────────────────────────────
+# A cart that imports WebGPU runs on Dawn's own device (Vulkan on Linux),
+# created by the core independent of the frontend's video driver; its frame
+# is copied into RetroArch's GL framebuffer. Dawn (native-dawn's dawn.node and
+# its library) and the reference host's JavaScript (wasmcart-native's bridge,
+# wasmcart's src/wgpu) are loaded at runtime from a directory beside the core,
+# wasmcart_libretro_wgpu/ ($WASMCART_WGPU_DIR overrides). Without it the core
+# runs dual GL + WebGPU carts on GL and refuses WebGPU-only carts.
+#   -DWASMCART_WGPU_JS_DIR=<wasmcart>/src/wgpu -DNATIVE_DAWN_DIR=<native-dawn>/<platform>
+# (deps/wasmcart-native/scripts/fetch-wgpu-deps.sh fetches both) builds that
+# directory beside the core.
+target_compile_definitions(wasmcart_libretro PRIVATE WASMCART_WGPU_BESIDE_MODULE="wasmcart_libretro_wgpu")
+set(WASMCART_WGPU_JS_DIR "" CACHE PATH "wasmcart's src/wgpu directory (host.js and the generated glue)")
+set(NATIVE_DAWN_DIR "" CACHE PATH "native-dawn release archive for this platform, unpacked")
+if(WASMCART_WGPU_JS_DIR AND NATIVE_DAWN_DIR)
+    set(WGPU_OUT "$<TARGET_FILE_DIR:wasmcart_libretro>/wasmcart_libretro_wgpu")
+    file(WRITE "${CMAKE_BINARY_DIR}/wgpu-package.json" "{ \"type\": \"module\" }\n")
+    if(WIN32)
+        set(WGPU_DAWN_FILES "${NATIVE_DAWN_DIR}/bin/dawn.node" "${NATIVE_DAWN_DIR}/bin/webgpu_dawn.dll"
+            "${NATIVE_DAWN_DIR}/bin/dxcompiler.dll" "${NATIVE_DAWN_DIR}/bin/dxil.dll")
+    elseif(APPLE)
+        set(WGPU_DAWN_FILES "${NATIVE_DAWN_DIR}/lib/dawn.node" "${NATIVE_DAWN_DIR}/lib/libwebgpu_dawn.dylib")
+    else()
+        set(WGPU_DAWN_FILES "${NATIVE_DAWN_DIR}/lib/dawn.node" "${NATIVE_DAWN_DIR}/lib/libwebgpu_dawn.so")
+    endif()
+    add_custom_target(wasmcart-libretro-wgpu ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${WGPU_OUT}/src/wgpu"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${WC_NATIVE}/src/wgpu_bridge.cjs" ${WGPU_DAWN_FILES} "${WGPU_OUT}/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${WASMCART_WGPU_JS_DIR}/host.js" "${WASMCART_WGPU_JS_DIR}/release.js"
+            "${WASMCART_WGPU_JS_DIR}/glue-loader.js" "${WASMCART_WGPU_JS_DIR}/emdawnwebgpu-glue.mjs"
+            "${WASMCART_WGPU_JS_DIR}/emdawnwebgpu-glue-manifest.js" "${WGPU_OUT}/src/wgpu/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${WASMCART_WGPU_JS_DIR}/../cartMemory.js" "${WGPU_OUT}/src/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_BINARY_DIR}/wgpu-package.json" "${WGPU_OUT}/package.json"
+        COMMENT "WebGPU support -> wasmcart_libretro_wgpu/")
+    add_dependencies(wasmcart-libretro-wgpu wasmcart_libretro)
+endif()
+
 # RPATH (Linux/macOS — find libnode.so next to the .so/.dylib)
 if(NOT WIN32)
     set_target_properties(wasmcart_libretro PROPERTIES

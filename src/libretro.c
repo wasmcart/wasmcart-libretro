@@ -548,6 +548,10 @@ static void finish_cart_init(void) {
     // loads its entry points from this, so the core links NO GL library of
     // its own (no ANGLE, single self-contained file).
     wc_host_set_gl_loader(host, (wc_gl_get_proc_fn)hw_render.get_proc_address);
+    // A WebGPU cart gets no GL imports, so the GL layer never loads its entry
+    // points from the cart's side; the core's present (the redirect FBO and
+    // the frame upload) needs them.
+    if (wc_host_uses_wgpu(host)) wc_gl_procs_load((void*)hw_render.get_proc_address);
 
     // Create redirect FBO with depth+stencil BEFORE cart init.
     // Three.js needs depth testing, Ganesh needs stencil.
@@ -827,6 +831,38 @@ void retro_unload_game(void) {
     // Save data is handled via retro_get_memory_*
 }
 
+// ─── WebGPU present ─────────────────────────────────────────────────────────
+
+static uint8_t* wgpu_px = NULL;
+static size_t wgpu_px_cap = 0;
+
+// Copy the WebGPU cart's frame into the redirect FBO (GL). The frame may be a
+// different size than wc_get_info said (the cart sizes its canvas itself);
+// the redirect target and the frontend follow it.
+static void present_wgpu_frame(void) {
+    uint32_t w = 0, h = 0;
+    if (wc_host_wgpu_frame_size(host, &w, &h) != 0) return;
+    if (w != cart_w || h != cart_h) {
+        extern void wc_gl_setup_redirect(uint32_t w, uint32_t h);
+        cart_w = w;
+        cart_h = h;
+        wc_gl_setup_redirect(w, h);
+        announce_cart_size(w, h);
+    }
+    size_t need = (size_t)w * h * 4;
+    if (need > wgpu_px_cap) {
+        uint8_t* p = (uint8_t*)realloc(wgpu_px, need);
+        if (!p) return;
+        wgpu_px = p;
+        wgpu_px_cap = need;
+    }
+    if (wc_host_wgpu_read_frame(host, wgpu_px, w, h) != 0) return;
+    // RGBA -> the BGRA byte order the framebuffer upload expects
+    for (size_t i = 0; i < need; i += 4) { uint8_t r = wgpu_px[i]; wgpu_px[i] = wgpu_px[i + 2]; wgpu_px[i + 2] = r; }
+    extern void wc_gl_upload_framebuffer(const uint8_t* pixels, uint32_t w, uint32_t h);
+    wc_gl_upload_framebuffer(wgpu_px, w, h);
+}
+
 // ─── Run frame ──────────────────────────────────────────────────────────────
 
 void retro_run(void) {
@@ -1078,8 +1114,12 @@ void retro_run(void) {
     } else if (hw_render.get_current_framebuffer) {
         uintptr_t ra_fbo = hw_render.get_current_framebuffer();
 
-        // For 2D carts: upload framebuffer pixels to redirect FBO as texture
-        if (!uses_gl) {
+        // WebGPU carts: the cart rendered on Dawn's own device; its frame
+        // comes back through a mapped buffer and is drawn into the redirect
+        // FBO like a 2D cart's framebuffer.
+        if (!uses_gl && wc_host_uses_wgpu(host)) {
+            present_wgpu_frame();
+        } else if (!uses_gl) {
             uint32_t fb_w, fb_h;
             const uint8_t* fb = wc_host_get_framebuffer(host, &fb_w, &fb_h);
             if (fb && fb_w > 0 && fb_h > 0) {
@@ -1099,7 +1139,7 @@ void retro_run(void) {
                 shot_n = colon ? atol(e) : -1;
                 if (colon) snprintf(shot_path, sizeof shot_path, "%s", colon + 1);
             }
-            if (uses_gl && frames_run == shot_n) {
+            if ((uses_gl || wc_host_uses_wgpu(host)) && frames_run == shot_n) {
                 extern int wc_gl_read_frame(uint8_t* out, uint32_t w, uint32_t h);
                 uint8_t* px = (uint8_t*)malloc((size_t)cart_w * cart_h * 4);
                 FILE* f = px && wc_gl_read_frame(px, cart_w, cart_h) ? fopen(shot_path, "wb") : NULL;
