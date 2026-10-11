@@ -11,6 +11,16 @@
 //               [--gles2 real|es3] [--expect-video sw|hw|black]
 //               [--expect-pixel X,Y,RRGGBB]
 //               [--sram-in FILE] [--sram-out FILE]
+//               [--input FILE] [--shot F:FILE.ppm]...
+//
+// --input plays a RetroPad on port 0 from a script: one line per change,
+// "<frame> <buttons> <lx> <ly> [<rx> <ry>]", buttons a comma list of RetroPad
+// names (b a y x l r l2 r2 l3 r3 start select up down left right) or "-",
+// sticks -1..1 (RETRO_DEVICE_ANALOG, y down). Each line sets the whole pad
+// from that frame (0-based retro_run count) on; '#' starts a comment.
+// --shot F:FILE writes the frame the core presented at retro_run F (0-based)
+// as a binary PPM, top row first (hardware frames read back from the
+// frontend's framebuffer). Up to 32.
 //
 // --sram-in loads FILE into the core's SAVE_RAM in RetroArch's order: right
 // after retro_load_game, before context_reset and the first retro_run, it
@@ -67,6 +77,8 @@ static unsigned long long sw_rgb[3], hw_rgb[3];   /* channel sums of the last fr
 static long px_x = -1, px_y = -1;
 static unsigned px_want = 0, px_got = 0xffffffffu;
 static unsigned last_w = 0, last_h = 0;
+static const unsigned char* sw_last = NULL;   /* the last software frame (the core keeps it until the next run) */
+static size_t sw_last_pitch = 0;
 
 static void note_message(const char* msg) {
     printf("lr_frontend: MESSAGE: %s\n", msg);
@@ -133,8 +145,10 @@ static bool env_cb(unsigned cmd, void* data) {
 static void video_cb(const void* d, unsigned w, unsigned h, size_t pitch) {
     if (!d) return;   /* dupe */
     last_w = w; last_h = h;
-    if (d == RETRO_HW_FRAME_BUFFER_VALID) { hw_frames++; return; }
+    if (d == RETRO_HW_FRAME_BUFFER_VALID) { hw_frames++; sw_last = NULL; return; }
     sw_frames++;
+    sw_last = d;
+    sw_last_pitch = pitch;
     sw_lit = 0;
     sw_rgb[0] = sw_rgb[1] = sw_rgb[2] = 0;
     for (unsigned y = 0; y < h; y++) {
@@ -149,10 +163,96 @@ static void video_cb(const void* d, unsigned w, unsigned h, size_t pitch) {
 }
 static size_t audio_batch_cb(const int16_t* d, size_t frames) { (void)d; audio_frames += frames; return frames; }
 static void audio_cb(int16_t l, int16_t r) { (void)l; (void)r; }
-static void input_poll_cb(void) {}
+/* --input: the scripted RetroPad on port 0 */
+#define MAX_SCRIPT 4096
+static struct { long frame; unsigned buttons; int16_t ax[4]; } in_script[MAX_SCRIPT];
+static int in_count = 0, in_pos = -1;
+static long cur_frame = 0;
+static int load_input(const char* path) {
+    static const char* names[16] = { "b", "y", "select", "start", "up", "down", "left", "right",
+                                     "a", "x", "l", "r", "l2", "r2", "l3", "r3" };
+    FILE* f = fopen(path, "r");
+    if (!f) return 0;
+    char line[512];
+    while (fgets(line, sizeof line, f) && in_count < MAX_SCRIPT) {
+        char* hash = strchr(line, '#');
+        if (hash) *hash = 0;
+        char btn[256];
+        float v[4] = { 0, 0, 0, 0 };
+        long fr;
+        int n = sscanf(line, "%ld %255s %f %f %f %f", &fr, btn, &v[0], &v[1], &v[2], &v[3]);
+        if (n < 2) continue;
+        unsigned b = 0;
+        if (strcmp(btn, "-")) {
+            for (char* t = strtok(btn, ","); t; t = strtok(NULL, ",")) {
+                int k = 0;
+                while (k < 16 && strcmp(names[k], t)) k++;
+                if (k == 16) { fprintf(stderr, "lr_frontend: unknown button %s\n", t); fclose(f); return 0; }
+                b |= 1u << k;
+            }
+        }
+        in_script[in_count].frame = fr;
+        in_script[in_count].buttons = b;
+        for (int i = 0; i < 4; i++) {
+            float c = v[i] < -1 ? -1 : v[i] > 1 ? 1 : v[i];
+            in_script[in_count].ax[i] = (int16_t)(c * 32767);
+        }
+        in_count++;
+    }
+    fclose(f);
+    return 1;
+}
+static void input_poll_cb(void) {
+    while (in_pos + 1 < in_count && in_script[in_pos + 1].frame <= cur_frame) in_pos++;
+}
 static int16_t input_state_cb(unsigned port, unsigned dev, unsigned idx, unsigned id) {
-    (void)port; (void)dev; (void)idx; (void)id;
+    if (port != 0 || in_pos < 0) return 0;
+    if (dev == RETRO_DEVICE_JOYPAD) {
+        if (id == RETRO_DEVICE_ID_JOYPAD_MASK) return (int16_t)in_script[in_pos].buttons;
+        return id < 16 ? (in_script[in_pos].buttons >> id) & 1 : 0;
+    }
+    if (dev == RETRO_DEVICE_ANALOG && idx <= RETRO_DEVICE_INDEX_ANALOG_RIGHT && id <= RETRO_DEVICE_ID_ANALOG_Y)
+        return in_script[in_pos].ax[idx * 2 + id];
     return 0;
+}
+
+/* --shot */
+#define MAX_SHOTS 32
+static long shot_frame[MAX_SHOTS];
+static const char* shot_file[MAX_SHOTS];
+static int shot_count = 0;
+static void write_shot(const char* path) {
+    if (!last_w || !last_h) { fprintf(stderr, "lr_frontend: no frame for %s\n", path); return; }
+    unsigned char* rgb = malloc((size_t)last_w * last_h * 3);
+    if (!rgb) return;
+    if (sw_last) {
+        for (unsigned y = 0; y < last_h; y++)
+            for (unsigned x = 0; x < last_w; x++) {
+                const unsigned char* q = sw_last + y * sw_last_pitch + x * 4;
+                unsigned char* o = rgb + ((size_t)y * last_w + x) * 3;
+                o[0] = q[2]; o[1] = q[1]; o[2] = q[0];
+            }
+    } else {
+        unsigned char* px = malloc((size_t)last_w * last_h * 4);
+        if (!px) { free(rgb); return; }
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glReadPixels(0, 0, last_w, last_h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        for (unsigned y = 0; y < last_h; y++)   /* bottom_left_origin */
+            for (unsigned x = 0; x < last_w; x++) {
+                const unsigned char* q = px + ((size_t)(last_h - 1 - y) * last_w + x) * 4;
+                unsigned char* o = rgb + ((size_t)y * last_w + x) * 3;
+                o[0] = q[0]; o[1] = q[1]; o[2] = q[2];
+            }
+        free(px);
+    }
+    FILE* o = fopen(path, "wb");
+    if (o) {
+        fprintf(o, "P6\n%u %u\n255\n", last_w, last_h);
+        fwrite(rgb, 1, (size_t)last_w * last_h * 3, o);
+        fclose(o);
+        printf("lr_frontend: frame %ld shot %s\n", cur_frame, path);
+    }
+    free(rgb);
 }
 
 static int egl_setup(unsigned w, unsigned h) {
@@ -217,6 +317,15 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--sram-in")) sram_in = argv[i + 1];
         else if (!strcmp(argv[i], "--sram-out")) sram_out = argv[i + 1];
         else if (!strcmp(argv[i], "--expect-video")) expect_video = argv[i + 1];
+        else if (!strcmp(argv[i], "--input")) {
+            if (!load_input(argv[i + 1])) { fprintf(stderr, "lr_frontend: cannot read %s\n", argv[i + 1]); return 2; }
+        }
+        else if (!strcmp(argv[i], "--shot") && shot_count < MAX_SHOTS) {
+            char* colon = strchr(argv[i + 1], ':');
+            if (!colon) return 2;
+            shot_frame[shot_count] = atol(argv[i + 1]);
+            shot_file[shot_count++] = colon + 1;
+        }
         else if (!strcmp(argv[i], "--expect-pixel")) {
             if (sscanf(argv[i + 1], "%ld,%ld,%x", &px_x, &px_y, &px_want) != 3) return 2;
         }
@@ -324,7 +433,10 @@ int main(int argc, char** argv) {
             retro_set_controller_port_device(0, RETRO_DEVICE_NONE);
             printf("lr_frontend: frame %ld port 0 unplugged\n", f);
         }
+        cur_frame = f;
         retro_run();
+        for (int k = 0; k < shot_count; k++)
+            if (shot_frame[k] == f) write_shot(shot_file[k]);
     }
     if (sram_out) {
         size_t size = retro_get_memory_size(RETRO_MEMORY_SAVE_RAM);
