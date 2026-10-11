@@ -147,6 +147,8 @@ static struct retro_hw_render_callback hw_render;  // persists — RetroArch fil
 // framebuffer is cleared to black instead.
 static bool gl_refused = false;
 static bool first_frame = true;
+// A WebGPU cart's frame has been shown (present_wgpu_frame).
+static bool wgpu_shown = false;
 static uint32_t cart_w = 0, cart_h = 0;
 // Largest geometry we have told RetroArch about (sizes its HW render FBO).
 static uint32_t max_w = 0, max_h = 0;
@@ -290,6 +292,7 @@ void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
 static uint32_t pref_width = 1920;
 static uint32_t pref_height = 1080;
 static bool jit_disabled = false;
+static bool wgpu_disabled = false;
 
 static const struct retro_core_option_v2_definition option_defs[] = {
     {
@@ -328,6 +331,21 @@ static const struct retro_core_option_v2_definition option_defs[] = {
         },
         "enabled"
     },
+    {
+        "wasmcart_gpu_api",
+        "GPU API",
+        NULL,
+        "Which GPU API a cart that supports both GL and WebGPU runs on. Auto: WebGPU when this core can "
+        "make a WebGPU device (Dawn on Vulkan, with the wasmcart_libretro_wgpu folder beside the core), else GL. "
+        "GL: always GL; a WebGPU-only cart then does not start. Applies when content is loaded or restarted.",
+        NULL, "video",
+        {
+            { "auto", "Auto (WebGPU when available)" },
+            { "gl",   "GL" },
+            { NULL, NULL },
+        },
+        "auto"
+    },
     { NULL, NULL, NULL, NULL, NULL, NULL, {{0}}, NULL },
 };
 
@@ -348,6 +366,9 @@ static void check_options(void) {
     struct retro_variable jit = { "wasmcart_jit", NULL };
     jit_disabled = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &jit) && jit.value &&
                    strcmp(jit.value, "disabled") == 0;
+    struct retro_variable api = { "wasmcart_gpu_api", NULL };
+    wgpu_disabled = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &api) && api.value &&
+                    strcmp(api.value, "gl") == 0;
 }
 
 // Tell the player on screen, where they are looking, and the log.
@@ -697,7 +718,9 @@ static bool load_cart(void) {
     opts.preferred_width = pref_width;
     opts.preferred_height = pref_height;
     opts.jit_disabled = jit_disabled;
+    opts.wgpu_disabled = wgpu_disabled;
     jit_notice_shown = false;
+    wgpu_shown = false;
     opts.defer_init = true;  // always defer — we'll finish in context_reset or first frame
     opts.save_data = sram;
     opts.save_data_size = sram ? sram_size : 0;
@@ -761,9 +784,22 @@ bool retro_load_game(const struct retro_game_info* game) {
     snprintf(game_path, sizeof game_path, "%s", game->path);
     if (!load_cart()) return false;
 
+    // Which GPU API a cart that imports WebGPU got, on screen once at load.
+    {
+        char msg[400];
+        const char* why = wc_host_wgpu_unavailable_reason(host);
+        if (wc_host_uses_wgpu(host)) {
+            snprintf(msg, sizeof msg, "WebGPU on %s", wc_host_wgpu_adapter(host));
+            notify(msg, RETRO_LOG_INFO, 4000);
+        } else if (why && *why) {
+            snprintf(msg, sizeof msg, "GL (no WebGPU: %s)", why);
+            notify(msg, RETRO_LOG_INFO, 4000);
+        }
+    }
+
     const wc_manifest_t* manifest = wc_host_get_manifest(host);
     if (log_cb) log_cb(RETRO_LOG_INFO, "wasmcart: loaded %s (%ux%u, %s)\n",
-        manifest->name, cart_w, cart_h, uses_gl ? "GL" : "2D");
+        manifest->name, cart_w, cart_h, wc_host_uses_wgpu(host) ? "WebGPU" : uses_gl ? "GL" : "2D");
 
     // Request HW render — unified GL display path for all carts. 2D carts get
     // their framebuffer uploaded to the redirect FBO as a texture, which needs
@@ -833,34 +869,29 @@ void retro_unload_game(void) {
 
 // ─── WebGPU present ─────────────────────────────────────────────────────────
 
-static uint8_t* wgpu_px = NULL;
-static size_t wgpu_px_cap = 0;
-
-// Copy the WebGPU cart's frame into the redirect FBO (GL). The frame may be a
-// different size than wc_get_info said (the cart sizes its canvas itself);
+// The cart rendered on Dawn's own device. Its frame reaches RetroArch's GL
+// framebuffer through a mapped buffer, pipelined: the copy of frame N is
+// queued as soon as it is rendered, and frame N-1 (copied while N rendered)
+// is drawn into the redirect FBO. One frame of latency; the core only waits
+// when the GPU has not finished N-1 by the next retro_run. The frame may be
+// a different size than wc_get_info said (the cart sizes its canvas itself);
 // the redirect target and the frontend follow it.
 static void present_wgpu_frame(void) {
-    uint32_t w = 0, h = 0;
-    if (wc_host_wgpu_frame_size(host, &w, &h) != 0) return;
-    if (w != cart_w || h != cart_h) {
+    wc_host_wgpu_frame_queue(host);
+    wc_wgpu_frame_t f;
+    // Nothing shown yet: wait for this very frame rather than show black.
+    if (wc_host_wgpu_frame_take(host, &f, wgpu_shown ? 1 : 0, 250) != 0) return;
+    if (f.width != cart_w || f.height != cart_h) {
         extern void wc_gl_setup_redirect(uint32_t w, uint32_t h);
-        cart_w = w;
-        cart_h = h;
-        wc_gl_setup_redirect(w, h);
-        announce_cart_size(w, h);
+        cart_w = f.width;
+        cart_h = f.height;
+        wc_gl_setup_redirect(f.width, f.height);
+        announce_cart_size(f.width, f.height);
     }
-    size_t need = (size_t)w * h * 4;
-    if (need > wgpu_px_cap) {
-        uint8_t* p = (uint8_t*)realloc(wgpu_px, need);
-        if (!p) return;
-        wgpu_px = p;
-        wgpu_px_cap = need;
-    }
-    if (wc_host_wgpu_read_frame(host, wgpu_px, w, h) != 0) return;
-    // RGBA -> the BGRA byte order the framebuffer upload expects
-    for (size_t i = 0; i < need; i += 4) { uint8_t r = wgpu_px[i]; wgpu_px[i] = wgpu_px[i + 2]; wgpu_px[i + 2] = r; }
-    extern void wc_gl_upload_framebuffer(const uint8_t* pixels, uint32_t w, uint32_t h);
-    wc_gl_upload_framebuffer(wgpu_px, w, h);
+    extern void wc_gl_upload_frame(const uint8_t* pixels, uint32_t w, uint32_t h, uint32_t row_pixels, int bgra);
+    wc_gl_upload_frame(f.data, f.width, f.height, f.bytes_per_row / 4, f.bgra);
+    wc_host_wgpu_frame_release(host);
+    wgpu_shown = true;
 }
 
 // ─── Run frame ──────────────────────────────────────────────────────────────
@@ -999,6 +1030,8 @@ void retro_run(void) {
         // the far edge cannot land one pixel outside the framebuffer.
         uint32_t cw = 0, ch = 0;
         (void)wc_host_get_framebuffer(host, &cw, &ch);
+        // GL and WebGPU carts have no framebuffer: their frame is cart_w x cart_h.
+        if (cw == 0 || ch == 0) { cw = cart_w; ch = cart_h; }
         if (cw == 0) cw = 1;
         if (ch == 0) ch = 1;
         long cx = ((long)px + 0x7fff) * (long)cw / 0xfffe;
