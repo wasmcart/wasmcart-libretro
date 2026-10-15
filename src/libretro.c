@@ -197,8 +197,6 @@ static double time_ms = 0;
 
 
 // Audio conversion buffer (F32 → S16)
-static int16_t* audio_conv_buf = NULL;
-static uint32_t audio_conv_cap = 0;
 
 // ─── GL state save/restore ──────────────────────────────────────────────────
 // Save cart's GL state after each frame, restore before next frame.
@@ -548,7 +546,7 @@ void retro_set_environment(retro_environment_t cb) {
 void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "wasmcart";
-    info->library_version = "0.12.2";
+    info->library_version = "0.12.3";
     info->valid_extensions = "wasc|wasm";
     info->need_fullpath = true;   // we read the file ourselves (ZIP)
     info->block_extract = true;   // don't extract, we handle ZIP
@@ -807,12 +805,9 @@ void retro_deinit(void) {
     wc_host_exit_v8();
     wc_host_destroy(host);
     host = NULL;
-    free(audio_conv_buf);
-    audio_conv_buf = NULL;
     free(sram);
     sram = NULL;
     sram_size = 0;
-    audio_conv_cap = 0;
 }
 
 // ─── Load game ──────────────────────────────────────────────────────────────
@@ -1454,30 +1449,11 @@ static void run_frame(double* delta_out) {
     // 6. Send audio
     double ph4 = perf_log_on ? perf_now_ms() : 0;
     ph_t.present = ph4 - ph3;
+    // int16 straight from the cart's ring (libretro takes only int16), one pass
     uint32_t num_frames;
-    bool is_f32;
-    const void* audio = wc_host_get_audio(host, &num_frames, &is_f32);
+    const int16_t* audio = wc_host_get_audio_s16(host, &num_frames);
     fe_t.samples += num_frames;
-    if (num_frames > 0 && audio_batch_cb) {
-        if (is_f32) {
-            // Convert F32 → S16 (libretro only accepts int16)
-            uint32_t needed = num_frames * 2; // stereo
-            if (audio_conv_cap < needed) {
-                audio_conv_buf = (int16_t*)realloc(audio_conv_buf, needed * sizeof(int16_t));
-                audio_conv_cap = needed;
-            }
-            const float* src = (const float*)audio;
-            for (uint32_t i = 0; i < needed; i++) {
-                float s = src[i];
-                if (s > 1.0f) s = 1.0f;
-                if (s < -1.0f) s = -1.0f;
-                audio_conv_buf[i] = (int16_t)(s * 32767.0f);
-            }
-            FE_CALL(audio, audio_batch_cb(audio_conv_buf, num_frames));
-        } else {
-            FE_CALL(audio, audio_batch_cb((const int16_t*)audio, num_frames));
-        }
-    }
+    if (num_frames > 0 && audio_batch_cb) FE_CALL(audio, audio_batch_cb(audio, num_frames));
     if (perf_log_on) ph_t.audio = perf_now_ms() - ph4;
 }
 
