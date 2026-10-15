@@ -14,6 +14,7 @@
 //               [--input FILE] [--shot F:FILE.ppm]... [--timing F]
 //               [--unplug-port F:P]... [--plug-port F:P]... [--max-users N]
 //               [--set-option F:key=value]... [--reset-at F] [--expect-size WxH]
+//               [--pace HZ]
 //
 // --input plays RetroPads from a script: one line per change,
 // "[p<port>] <frame> <buttons> <lx> <ly> [<rx> <ry>]", port 0-3 (0 when
@@ -34,7 +35,12 @@
 // reinit does.
 // --timing F times every retro_run from frame F on, each followed by glFinish
 // (the GPU work of the frame counted, as a frontend's swap would wait for it),
-// and prints the mean, median, 95th percentile and worst frame in ms.
+// and prints the mean, median, 95th percentile and worst frame in ms; then
+// the same for retro_run alone (the wall clock before the glFinish) and for
+// the main thread's CPU time inside retro_run (what the core costs the CPU,
+// whatever the GPU does).
+// --pace HZ starts retro_run F at F / HZ seconds after the first, as a
+// frontend synced to the display does (default: back to back).
 //
 // --sram-in loads FILE into the core's SAVE_RAM in RetroArch's order: right
 // after retro_load_game, before context_reset and the first retro_run, it
@@ -355,6 +361,7 @@ int main(int argc, char** argv) {
                         "[--option key=value]... [--expect-message TEXT]\n", argv[0]);
         return 2;
     }
+    double pace_hz = 0;
     long frames = 300, save_at = -1, restore_at = -1, timing_from = -1, reset_at = -1;
     unsigned want_w = 0, want_h = 0;
     const char* state_out = NULL;
@@ -384,6 +391,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--sram-out")) sram_out = argv[i + 1];
         else if (!strcmp(argv[i], "--expect-video")) expect_video = argv[i + 1];
         else if (!strcmp(argv[i], "--timing")) timing_from = atol(argv[i + 1]);
+        else if (!strcmp(argv[i], "--pace")) pace_hz = atof(argv[i + 1]);
         else if (!strcmp(argv[i], "--reset-at")) reset_at = atol(argv[i + 1]);
         else if (!strcmp(argv[i], "--expect-size")) { if (sscanf(argv[i + 1], "%ux%u", &want_w, &want_h) != 2) return 2; }
         else if (!strcmp(argv[i], "--set-option") && set_count < MAX_SETS) {
@@ -483,8 +491,10 @@ int main(int argc, char** argv) {
 
     void* state = NULL;
     size_t state_size = 0;
-    double* times = NULL;
+    double *times = NULL, *runs = NULL, *cpus = NULL;
     long n_times = 0;
+    struct timespec pace0;
+    clock_gettime(CLOCK_MONOTONIC, &pace0);
     for (long f = 0; f < frames && !trapped; f++) {
         if (f == save_at) {
             state_size = retro_serialize_size();
@@ -532,9 +542,21 @@ int main(int argc, char** argv) {
             retro_reset();
         }
         cur_frame = f;
-        struct timespec t0, t1;
-        if (timing_from >= 0 && f >= timing_from) clock_gettime(CLOCK_MONOTONIC, &t0);
+        if (pace_hz > 0) {
+            double at = (double)pace0.tv_sec + (double)pace0.tv_nsec * 1e-9 + (double)f / pace_hz;
+            struct timespec until = { (time_t)at, (long)((at - (double)(time_t)at) * 1e9) };
+            while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &until, NULL) != 0) { }
+        }
+        struct timespec t0, t1, tr, c0, c1;
+        if (timing_from >= 0 && f >= timing_from) {
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c0);
+        }
         retro_run();
+        if (timing_from >= 0 && f >= timing_from) {
+            clock_gettime(CLOCK_MONOTONIC, &tr);
+            clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c1);
+        }
         if (av_w && av_h) { /* RetroArch's video reinit: the framebuffer at the new maximum */
             fe_storage(av_w, av_h);
             av_w = av_h = 0;
@@ -542,19 +564,32 @@ int main(int argc, char** argv) {
         if (timing_from >= 0 && f >= timing_from) {
             glFinish();
             clock_gettime(CLOCK_MONOTONIC, &t1);
-            if (!times) times = calloc((size_t)frames, sizeof *times);
-            if (times) times[n_times++] = (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+            if (!times) {
+                times = calloc((size_t)frames, sizeof *times);
+                runs = calloc((size_t)frames, sizeof *runs);
+                cpus = calloc((size_t)frames, sizeof *cpus);
+            }
+            if (times && runs && cpus) {
+                times[n_times] = (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+                runs[n_times] = (double)(tr.tv_sec - t0.tv_sec) * 1e3 + (double)(tr.tv_nsec - t0.tv_nsec) / 1e6;
+                cpus[n_times++] = (double)(c1.tv_sec - c0.tv_sec) * 1e3 + (double)(c1.tv_nsec - c0.tv_nsec) / 1e6;
+            }
         }
         for (int k = 0; k < shot_count; k++)
             if (shot_frame[k] == f) write_shot(shot_file[k]);
     }
     if (n_times) {
-        double sum = 0;
-        for (long i = 0; i < n_times; i++) sum += times[i];
-        qsort(times, (size_t)n_times, sizeof *times, cmp_double);
-        printf("lr_frontend: timing %ld frames from %ld: mean %.2f ms, median %.2f, p95 %.2f, worst %.2f\n", n_times, timing_from,
-               sum / (double)n_times, times[n_times / 2], times[(n_times * 95) / 100 < n_times ? (n_times * 95) / 100 : n_times - 1],
-               times[n_times - 1]);
+        static const char* what[3] = { "timing", "retro_run wall", "retro_run main-thread CPU" };
+        double* sets[3] = { times, runs, cpus };
+        for (int k = 0; k < 3; k++) {
+            double* v = sets[k];
+            double sum = 0;
+            for (long i = 0; i < n_times; i++) sum += v[i];
+            qsort(v, (size_t)n_times, sizeof *v, cmp_double);
+            printf("lr_frontend: %s %ld frames from %ld: mean %.2f ms, median %.2f, p95 %.2f, worst %.2f\n", what[k], n_times, timing_from,
+                   sum / (double)n_times, v[n_times / 2], v[(n_times * 95) / 100 < n_times ? (n_times * 95) / 100 : n_times - 1],
+                   v[n_times - 1]);
+        }
     }
     if (sram_out) {
         size_t size = retro_get_memory_size(RETRO_MEMORY_SAVE_RAM);

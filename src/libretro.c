@@ -547,7 +547,7 @@ void retro_set_environment(retro_environment_t cb) {
 void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "wasmcart";
-    info->library_version = "0.11.0";
+    info->library_version = "0.12.0";
     info->valid_extensions = "wasc|wasm";
     info->need_fullpath = true;   // we read the file ourselves (ZIP)
     info->block_extract = true;   // don't extract, we handle ZIP
@@ -1077,6 +1077,11 @@ static void present_wgpu_frame(void) {
 // RetroArch can block in them (audio sync waiting for its queue to drain,
 // video_cb on a swap), which the cart's own times do not show.
 static struct { double video, audio, input; unsigned samples; } fe_t;
+// Where retro_run's time went this frame (the performance log's phases):
+// input (polling RetroArch and building the pads), the cart's GL state put
+// back, wc_host_run_frame, presenting (the WebGPU frame into GL, the blit,
+// the GL state saved and reset for RetroArch, video_cb) and audio.
+static struct { double input, glstate, frame, present, audio; } ph_t;
 #define FE_CALL(slot, call) do { double fe_t0_ = perf_now_ms(); call; fe_t.slot += perf_now_ms() - fe_t0_; } while (0)
 static void run_frame(double* delta_out);
 static void perf_frame(double t_enter, double t_exit, double delta_ms);
@@ -1100,6 +1105,7 @@ void retro_run(void) {
     if (!perf_log_on) { run_frame(NULL); return; }
     double delta = 0, t0 = perf_now_ms();
     memset(&fe_t, 0, sizeof fe_t);
+    memset(&ph_t, 0, sizeof ph_t);
     run_frame(&delta);
     perf_frame(t0, perf_now_ms(), delta);
 }
@@ -1140,6 +1146,7 @@ static void run_frame(double* delta_out) {
     // Run rumble durations down before polling, so an effect started last
     // frame stops on time even if the cart does not call rumble again.
     rumble_tick();
+    double ph0 = perf_log_on ? perf_now_ms() : 0;
 
     // 1. Poll input
     FE_CALL(input, input_poll_cb());
@@ -1269,6 +1276,9 @@ static void run_frame(double* delta_out) {
         if (wdx || wdy) wc_host_add_wheel(host, wdx, wdy);
     }
 
+    double ph1 = perf_log_on ? perf_now_ms() : 0;
+    ph_t.input = ph1 - ph0;
+
     // 3. Set time: one retro_run is one frame of the frontend's timing (60 fps),
     // so a cart advances 1000/60 ms and makes that much audio. The frontend's
     // measured frame time is NOT used: a cart makes audio for the dt it is given
@@ -1335,6 +1345,7 @@ static void run_frame(double* delta_out) {
     }
 
     // 4. Run one frame — restore cart's GL state before rendering
+    double ph2 = perf_log_on ? perf_now_ms() : 0;
     if (gl_context_ready) {
         restore_cart_gl_state();
         extern void wc_gl_rebind_redirect(void);
@@ -1342,8 +1353,11 @@ static void run_frame(double* delta_out) {
     }
     lr_update_input_devices();
     double t_cart = perf_now_ms();
+    ph_t.glstate = t_cart - ph2;
     wc_host_run_frame(host);
     wgpu_t.cart = perf_now_ms() - t_cart;
+    ph_t.frame = wgpu_t.cart;
+    double ph3 = perf_log_on ? perf_now_ms() : 0;
     sram_from_cart();
     jit_notice_tick();
     lr_update_input_descriptors();
@@ -1435,6 +1449,8 @@ static void run_frame(double* delta_out) {
     }
 
     // 6. Send audio
+    double ph4 = perf_log_on ? perf_now_ms() : 0;
+    ph_t.present = ph4 - ph3;
     uint32_t num_frames;
     bool is_f32;
     const void* audio = wc_host_get_audio(host, &num_frames, &is_f32);
@@ -1459,6 +1475,7 @@ static void run_frame(double* delta_out) {
             FE_CALL(audio, audio_batch_cb((const int16_t*)audio, num_frames));
         }
     }
+    if (perf_log_on) ph_t.audio = perf_now_ms() - ph4;
 }
 
 // ─── Save states ────────────────────────────────────────────────────────────
@@ -1573,6 +1590,10 @@ static struct {
     // the frontend's callbacks (fe_t)
     double fe_video, fe_video_max, fe_audio, fe_audio_max, fe_input, samples;
     double cpu_main0, cpu_all0;
+    // phases (ph_t), and inside wc_host_run_frame: the cart's wc_render, and
+    // the WebGPU calls served by Dawn directly
+    double p_input, p_glstate, p_frame, p_present, p_audio, p_render, p_host_frame;
+    double wgpu_calls;
 } PS;
 /* CPU time of the calling thread (1) or the whole process (0); 0 where the clocks are missing */
 static double cpu_ms(int thread) {
@@ -1639,6 +1660,14 @@ static void perf_frame(double t_enter, double t_exit, double delta_ms) {
     if (delta_ms > PS.dt_max) PS.dt_max = delta_ms;
     PS.gc_ms += pr.gc_ms;
     PS.gc_count += pr.gc_count;
+    PS.p_input += ph_t.input;
+    PS.p_glstate += ph_t.glstate;
+    PS.p_frame += ph_t.frame;
+    PS.p_present += ph_t.present;
+    PS.p_audio += ph_t.audio;
+    PS.p_render += pr.render_ms;
+    PS.p_host_frame += pr.frame_ms - pr.render_ms;
+    PS.wgpu_calls += (double)pr.wgpu_calls;
     PS.fe_video += fe_t.video;
     if (fe_t.video > PS.fe_video_max) PS.fe_video_max = fe_t.video;
     PS.fe_audio += fe_t.audio;
@@ -1674,6 +1703,12 @@ static void perf_frame(double t_enter, double t_exit, double delta_ms) {
                       t, PS.fe_video / n, PS.fe_video_max, PS.fe_audio / n, PS.fe_audio_max, PS.samples / n,
                       rate / 60.0, rate, PS.fe_input / n);
         }
+        // the phases, in ms per frame; wc_render's GL imports are its "gl" share
+        perf_line("wasmcart perf: t=%.0f phases | input %.3f | glstate %.3f | wc_render %.3f | gl_imports %.3f | "
+                  "host_frame %.3f | present %.3f | audio %.3f | other %.3f | wgpu_direct_calls %.0f",
+                  t, PS.p_input / n, PS.p_glstate / n, PS.p_render / n, PS.gl_sum / n, PS.p_host_frame / n,
+                  PS.p_present / n, PS.p_audio / n,
+                  (PS.run_sum - PS.p_input - PS.p_glstate - PS.p_frame - PS.p_present - PS.p_audio) / n, PS.wgpu_calls / n);
         if (host && wc_host_uses_wgpu(host)) {
             double sh = PS.w_shown ? PS.w_shown : 1;
             if (wgpu_gl_shared)
