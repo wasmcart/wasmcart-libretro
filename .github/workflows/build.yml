@@ -13,11 +13,12 @@ env:
   # .so): Dawn from native-dawn's release (sha256 pinned in
   # deps/wasmcart-native/scripts/fetch-wgpu-deps.sh) and wasmcart's WebGPU
   # host JavaScript from its package: the npm pack tarball on its GitHub
-  # release (the bytes npm publishes). native-dawn 0.1.4: objectHandle and
-  # the shared-texture features the zero-copy present needs.
-  NATIVE_DAWN_VERSION: 0.1.4
-  WASMCART_VERSION: 0.34.0
-  WASMCART_SPEC: https://github.com/wasmcart/wasmcart/releases/download/v0.34.0/wasmcart-0.34.0.tgz
+  # release (the bytes npm publishes). The versions wasmcart-native's own CI
+  # pins at the submodule's commit (native-dawn 0.1.5: objectHandle on a Proxy
+  # of a WebGPU object, and the wasmImports its bridge calls).
+  NATIVE_DAWN_VERSION: 0.1.5
+  WASMCART_VERSION: 0.34.2
+  WASMCART_SPEC: https://github.com/wasmcart/wasmcart/releases/download/v0.34.2/wasmcart-0.34.2.tgz
 
 jobs:
   build-linux-x86_64:
