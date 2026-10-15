@@ -12,13 +12,17 @@
 //               [--expect-pixel X,Y,RRGGBB]
 //               [--sram-in FILE] [--sram-out FILE]
 //               [--input FILE] [--shot F:FILE.ppm]... [--timing F]
+//               [--unplug-port F:P]... [--plug-port F:P]... [--max-users N]
 //               [--set-option F:key=value]... [--reset-at F] [--expect-size WxH]
 //
-// --input plays a RetroPad on port 0 from a script: one line per change,
-// "<frame> <buttons> <lx> <ly> [<rx> <ry>]", buttons a comma list of RetroPad
-// names (b a y x l r l2 r2 l3 r3 start select up down left right) or "-",
-// sticks -1..1 (RETRO_DEVICE_ANALOG, y down). Each line sets the whole pad
-// from that frame (0-based retro_run count) on; '#' starts a comment.
+// --input plays RetroPads from a script: one line per change,
+// "[p<port>] <frame> <buttons> <lx> <ly> [<rx> <ry>]", port 0-3 (0 when
+// absent), buttons a comma list of RetroPad names (b a y x l r l2 r2 l3 r3
+// start select up down left right) or "-", sticks -1..1 (RETRO_DEVICE_ANALOG,
+// y down). Each line sets that port's whole pad from that frame (0-based
+// retro_run count) on; '#' starts a comment. --unplug-port F:P sets port P
+// to RETRO_DEVICE_NONE at frame F, --plug-port F:P back to a RetroPad;
+// --max-users N answers RETRO_ENVIRONMENT_GET_INPUT_MAX_USERS.
 // --shot F:FILE writes the frame the core presented at retro_run F (0-based)
 // as a binary PPM, top row first (hardware frames read back from the
 // frontend's framebuffer). Up to 32.
@@ -115,8 +119,13 @@ static void log_cb(enum retro_log_level level, const char* fmt, ...) {
 static uintptr_t get_fb(void) { return fbo; }
 static retro_proc_address_t get_proc(const char* sym) { return (retro_proc_address_t)eglGetProcAddress(sym); }
 
+static long max_users = -1; /* --max-users: GET_INPUT_MAX_USERS answered (else unsupported) */
 static bool env_cb(unsigned cmd, void* data) {
     switch (cmd) {
+    case RETRO_ENVIRONMENT_GET_INPUT_MAX_USERS:
+        if (max_users < 0) return false;
+        *(unsigned*)data = (unsigned)max_users;
+        return true;
     case RETRO_ENVIRONMENT_GET_LOG_INTERFACE:
         ((struct retro_log_callback*)data)->log = log_cb;
         return true;
@@ -191,10 +200,11 @@ static void video_cb(const void* d, unsigned w, unsigned h, size_t pitch) {
 }
 static size_t audio_batch_cb(const int16_t* d, size_t frames) { (void)d; audio_frames += frames; return frames; }
 static void audio_cb(int16_t l, int16_t r) { (void)l; (void)r; }
-/* --input: the scripted RetroPad on port 0 */
+/* --input: the scripted RetroPads on ports 0-3 */
 #define MAX_SCRIPT 4096
-static struct { long frame; unsigned buttons; int16_t ax[4]; } in_script[MAX_SCRIPT];
-static int in_count = 0, in_pos = -1;
+#define PORTS 4
+static struct { long frame; unsigned buttons; int16_t ax[4]; } in_script[PORTS][MAX_SCRIPT];
+static int in_count[PORTS], in_pos[PORTS] = { -1, -1, -1, -1 };
 static long cur_frame = 0;
 static int cmp_double(const void* a, const void* b) {
     double x = *(const double*)a, y = *(const double*)b;
@@ -206,13 +216,21 @@ static int load_input(const char* path) {
     FILE* f = fopen(path, "r");
     if (!f) return 0;
     char line[512];
-    while (fgets(line, sizeof line, f) && in_count < MAX_SCRIPT) {
+    while (fgets(line, sizeof line, f)) {
         char* hash = strchr(line, '#');
         if (hash) *hash = 0;
         char btn[256];
         float v[4] = { 0, 0, 0, 0 };
         long fr;
-        int n = sscanf(line, "%ld %255s %f %f %f %f", &fr, btn, &v[0], &v[1], &v[2], &v[3]);
+        char* l = line;
+        while (*l == ' ' || *l == '\t') l++;
+        int port = 0;
+        if (*l == 'p') {
+            port = (int)strtol(l + 1, &l, 10);
+            if (port < 0 || port >= PORTS) { fprintf(stderr, "lr_frontend: bad port in %s", line); fclose(f); return 0; }
+        }
+        if (in_count[port] == MAX_SCRIPT) continue;
+        int n = sscanf(l, "%ld %255s %f %f %f %f", &fr, btn, &v[0], &v[1], &v[2], &v[3]);
         if (n < 2) continue;
         unsigned b = 0;
         if (strcmp(btn, "-")) {
@@ -223,28 +241,30 @@ static int load_input(const char* path) {
                 b |= 1u << k;
             }
         }
-        in_script[in_count].frame = fr;
-        in_script[in_count].buttons = b;
+        in_script[port][in_count[port]].frame = fr;
+        in_script[port][in_count[port]].buttons = b;
         for (int i = 0; i < 4; i++) {
             float c = v[i] < -1 ? -1 : v[i] > 1 ? 1 : v[i];
-            in_script[in_count].ax[i] = (int16_t)(c * 32767);
+            in_script[port][in_count[port]].ax[i] = (int16_t)(c * 32767);
         }
-        in_count++;
+        in_count[port]++;
     }
     fclose(f);
     return 1;
 }
 static void input_poll_cb(void) {
-    while (in_pos + 1 < in_count && in_script[in_pos + 1].frame <= cur_frame) in_pos++;
+    for (int p = 0; p < PORTS; p++)
+        while (in_pos[p] + 1 < in_count[p] && in_script[p][in_pos[p] + 1].frame <= cur_frame) in_pos[p]++;
 }
 static int16_t input_state_cb(unsigned port, unsigned dev, unsigned idx, unsigned id) {
-    if (port != 0 || in_pos < 0) return 0;
+    if (port >= PORTS || in_pos[port] < 0) return 0;
+    const unsigned buttons = in_script[port][in_pos[port]].buttons;
     if (dev == RETRO_DEVICE_JOYPAD) {
-        if (id == RETRO_DEVICE_ID_JOYPAD_MASK) return (int16_t)in_script[in_pos].buttons;
-        return id < 16 ? (in_script[in_pos].buttons >> id) & 1 : 0;
+        if (id == RETRO_DEVICE_ID_JOYPAD_MASK) return (int16_t)buttons;
+        return id < 16 ? (buttons >> id) & 1 : 0;
     }
     if (dev == RETRO_DEVICE_ANALOG && idx <= RETRO_DEVICE_INDEX_ANALOG_RIGHT && id <= RETRO_DEVICE_ID_ANALOG_Y)
-        return in_script[in_pos].ax[idx * 2 + id];
+        return in_script[port][in_pos[port]].ax[idx * 2 + id];
     return 0;
 }
 
@@ -340,6 +360,9 @@ int main(int argc, char** argv) {
     const char* state_out = NULL;
     const char* state_in = NULL;
     long unplug_at = -1;
+#define MAX_PLUGS 16
+    long plug_frame[MAX_PLUGS];
+    int plug_port[MAX_PLUGS], plug_dev[MAX_PLUGS], plug_count = 0;
     const char* expect_video = NULL;
     const char* sram_in = NULL;
     const char* sram_out = NULL;
@@ -351,6 +374,11 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--state-out")) state_out = argv[i + 1];
         else if (!strcmp(argv[i], "--state-in")) state_in = argv[i + 1];
         else if (!strcmp(argv[i], "--unplug-at")) unplug_at = atol(argv[i + 1]);
+        else if (!strcmp(argv[i], "--max-users")) max_users = atol(argv[i + 1]);
+        else if ((!strcmp(argv[i], "--unplug-port") || !strcmp(argv[i], "--plug-port")) && plug_count < MAX_PLUGS) {
+            if (sscanf(argv[i + 1], "%ld:%d", &plug_frame[plug_count], &plug_port[plug_count]) != 2) return 2;
+            plug_dev[plug_count++] = argv[i][2] == 'u' ? RETRO_DEVICE_NONE : RETRO_DEVICE_JOYPAD;
+        }
         else if (!strcmp(argv[i], "--gles2")) gles2 = argv[i + 1];
         else if (!strcmp(argv[i], "--sram-in")) sram_in = argv[i + 1];
         else if (!strcmp(argv[i], "--sram-out")) sram_out = argv[i + 1];
@@ -485,6 +513,11 @@ int main(int argc, char** argv) {
         if (f == unplug_at) {
             retro_set_controller_port_device(0, RETRO_DEVICE_NONE);
             printf("lr_frontend: frame %ld port 0 unplugged\n", f);
+        }
+        for (int k = 0; k < plug_count; k++) {
+            if (plug_frame[k] != f) continue;
+            retro_set_controller_port_device((unsigned)plug_port[k], (unsigned)plug_dev[k]);
+            printf("lr_frontend: frame %ld port %d %s\n", f, plug_port[k], plug_dev[k] ? "plugged in" : "unplugged");
         }
         for (int k = 0; k < set_count; k++) {
             if (set_frame[k] != f) continue;

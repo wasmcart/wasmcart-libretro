@@ -43,6 +43,10 @@
 #    traps at once) stops the cart with the reason on screen. Its worker needs
 #    real time to start and trap, which a 16x16 cart's frames do not take: up
 #    to 100000 of them (the run ends at the trap, in about 2 s).
+# 10. Four pads: wasmcart-native's padcart shows each wc_pad_t. Ports 1-3 are
+#    connected from their first input (port 0 always), each in its own slot,
+#    and stay so until the frontend sets the port to None or its user count
+#    drops below it (ports 1-3 were never connected before 0.11.0).
 # 8. WebGPU (the build must have wasmcart_libretro_wgpu/ beside the core, and
 #    the machine a Vulkan GPU): wasmcart-native's fixtures run on Dawn and
 #    their frames reach RetroArch's GL framebuffer with the right pixels. The
@@ -135,6 +139,12 @@ printf '\x01\x00\x00\x00' > "$WORK/save.srm"
 run "reset: a 2D cart restarts with its save" "$WORK/save.wasc" --frames 20 --sram-in "$WORK/save.srm" \
     --reset-at 10 --sram-out "$WORK/save.srm" --expect-pixel 10,10,2222ff
 check_srm "reset: the 2D cart saves on top of it" 03
+fi
+# 10. Four pads (test/pads_test.sh, also run on its own in CI)
+if sh "$(dirname "$0")/pads_test.sh" "$BUILD" > "$WORK/pads.txt" 2>&1; then
+  pass=$((pass + $(grep -c '^ok' "$WORK/pads.txt"))); grep '^ok' "$WORK/pads.txt"
+else
+  fail=$((fail + 1)); cat "$WORK/pads.txt"
 fi
 cp "$(dirname "$0")/../deps/wasmcart-native/test/threaddie.wasc" "$WORK/threaddie.wasc"
 timeout -s KILL 180 "$FE" "$CORE" "$WORK/threaddie.wasc" --frames 100000 > "$WORK/out.txt" 2>&1

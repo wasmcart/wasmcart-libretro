@@ -104,6 +104,30 @@ static unsigned lr_port_device[WC_LR_PORTS] = {
     RETRO_DEVICE_JOYPAD, RETRO_DEVICE_JOYPAD, RETRO_DEVICE_JOYPAD, RETRO_DEVICE_JOYPAD };
 static int lr_device_sent[WC_LR_PORTS] = { -1, -1, -1, -1 };
 
+// Which pads the cart sees connected. libretro does not say whether a port has
+// a physical controller behind it (an empty port reads all zeros), so port 0
+// is always connected and ports 1-3 become connected the first time they give
+// any input (a button, or a stick or trigger past a quarter of its travel), as
+// a browser's Gamepad API reveals a pad on its first press. A port the
+// frontend sets to RETRO_DEVICE_NONE, or one at or past its number of users
+// (RETRO_ENVIRONMENT_GET_INPUT_MAX_USERS), is disconnected. Through 0.10.0 ports
+// 1-3 were never connected, so a cart never saw players 2-4 at all.
+static bool lr_port_seen[WC_LR_PORTS];
+static unsigned lr_max_users = WC_LR_PORTS;
+static bool lr_pad_connected(int p, const wc_pad_t* pad) {
+    if (p == 0) return true;
+    if (p >= WC_LR_PORTS || (unsigned)p >= lr_max_users || (lr_port_device[p] & RETRO_DEVICE_MASK) == RETRO_DEVICE_NONE) {
+        if (p < WC_LR_PORTS) lr_port_seen[p] = false;
+        return false;
+    }
+    const int q = 8192;
+    if (pad->buttons || pad->left_x > q || pad->left_x < -q || pad->left_y > q || pad->left_y < -q ||
+        pad->right_x > q || pad->right_x < -q || pad->right_y > q || pad->right_y < -q ||
+        pad->left_trigger > q || pad->right_trigger > q)
+        lr_port_seen[p] = true;
+    return lr_port_seen[p];
+}
+
 static void lr_update_input_devices(void) {
     for (int p = 0; p < WC_LR_PORTS; p++) {
         unsigned base = lr_port_device[p] & RETRO_DEVICE_MASK;
@@ -523,7 +547,7 @@ void retro_set_environment(retro_environment_t cb) {
 void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "wasmcart";
-    info->library_version = "0.10.0";
+    info->library_version = "0.11.0";
     info->valid_extensions = "wasc|wasm";
     info->need_fullpath = true;   // we read the file ourselves (ZIP)
     info->block_extract = true;   // don't extract, we handle ZIP
@@ -860,6 +884,7 @@ bool retro_load_game(const struct retro_game_info* game) {
     lr_action_count = -1;   // input descriptors are re-sent for the new cart
     for (int p = 0; p < WC_LR_PORTS; p++) lr_device_sent[p] = -1;  // and devices
     lr_frames = 0;
+    memset(lr_port_seen, 0, sizeof lr_port_seen);
     if (!host || !game || !game->path) return false;
 
     // Set up file logging next to the cart (Android: logcat buffer too small)
@@ -1120,6 +1145,10 @@ static void run_frame(double* delta_out) {
     FE_CALL(input, input_poll_cb());
 
     // 2. Translate RetroArch input → wasmcart pads
+    {
+        unsigned users = 0; // the frontend's player count can change while running
+        if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_INPUT_MAX_USERS, &users)) lr_max_users = users;
+    }
     wc_pad_t pads[WC_MAX_PADS];
     memset(pads, 0, sizeof(pads));
 
@@ -1166,7 +1195,8 @@ static void run_frame(double* delta_out) {
         // to get wrong.
         pads[p].left_trigger  = input_state_cb(p, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_BUTTON, RETRO_DEVICE_ID_JOYPAD_L2);
         pads[p].right_trigger = input_state_cb(p, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_BUTTON, RETRO_DEVICE_ID_JOYPAD_R2);
-        pads[p].connected = (p == 0) ? 1 : 0; // Port 0 always connected
+        pads[p].connected = lr_pad_connected(p, &pads[p]);
+        if (!pads[p].connected) memset(&pads[p], 0, sizeof pads[p]);
     }
     wc_host_set_pads(host, pads);
 

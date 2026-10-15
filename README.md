@@ -178,6 +178,16 @@ cmake -B build -DWASMCART_WGPU_JS_DIR=$PWD/deps/wgpu/wasmcart/src/wgpu \
 cmake --build build    # build/wasmcart_libretro.so + build/wasmcart_libretro_wgpu/
 ```
 
+## Controllers
+
+Ports 1-4 are the cart's pads 0-3 (players 1-4), as RetroPads. libretro does
+not tell a core whether a port has a controller behind it, so port 1 is always
+connected and ports 2-4 become connected the first time they give any input
+(a button, or a stick or trigger past a quarter of its travel), the way a
+browser reveals a gamepad on its first press. A port set to None in Quick Menu
+→ Controls, or past the number of users RetroArch is set to, is disconnected.
+`test/pads_test.sh` checks it with wasmcart-native's pad cart.
+
 ## Core Options
 
 - **Internal Resolution**: 270p, 360p, 640x480, 540p, 720p, 1080p, 1440p, 4K — passed to the cart as its preferred resolution (`wc_host_info_t`); a cart that follows it (cartwheel games do) renders the largest frame of its own aspect that fits, and RetroArch shows it at that aspect. Applies when content loads or restarts (Quick Menu → Restart Content)

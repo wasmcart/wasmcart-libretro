@@ -27,7 +27,7 @@ jobs:
         with:
           submodules: recursive
       - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y cmake g++ libvulkan-dev
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ libvulkan-dev libegl-dev libgles-dev libegl-mesa0 libgl1-mesa-dri
       - name: Download libnode
         run: |
           mkdir -p deps/libnode
@@ -37,8 +37,11 @@ jobs:
       - name: Build
         run: |
           mkdir build && cd build
-          cmake .. -DWASMCART_WGPU_JS_DIR=$PWD/../deps/wgpu/wasmcart/src/wgpu -DNATIVE_DAWN_DIR=$PWD/../deps/wgpu/native-dawn
+          cmake .. -DWASMCART_WGPU_JS_DIR=$PWD/../deps/wgpu/wasmcart/src/wgpu -DNATIVE_DAWN_DIR=$PWD/../deps/wgpu/native-dawn -DWASMCART_LIBRETRO_TESTS=ON
           make -j$(nproc)
+      # four RetroPads into the pad cart, through the headless frontend on Mesa's software GL
+      - name: Pads test
+        run: sh test/pads_test.sh build
       - name: Package
         run: |
           strip build/wasmcart_libretro.so
