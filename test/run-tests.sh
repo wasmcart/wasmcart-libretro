@@ -131,11 +131,11 @@ run "reset: a higher Internal Resolution applies" "$WORK/res.wasm" --frames 20 -
 grep -q "SET_SYSTEM_AV_INFO 1920x1080" "$WORK/out.txt" \
   && { echo "ok   reset: a larger frame reinitializes video"; pass=$((pass + 1)); } \
   || { echo "FAIL reset: a larger frame reinitializes video"; grep -E "GEOMETRY|AV_INFO" "$WORK/out.txt" | sed 's/^/     /'; fail=$((fail + 1)); }
-printf '\x01\x00\x00\x00' > "$WORK/save.srm"
+printf '\001\000\000\000' > "$WORK/save.srm"
 run "reset: the restarted cart reads the current save" "$WORK/res.wasm" --frames 20 --sram-in "$WORK/save.srm" \
     --reset-at 10 --sram-out "$WORK/save.srm" --expect-pixel 5,5,2222ff
 check_srm "reset: and saves on top of it" 03
-printf '\x01\x00\x00\x00' > "$WORK/save.srm"
+printf '\001\000\000\000' > "$WORK/save.srm"
 run "reset: a 2D cart restarts with its save" "$WORK/save.wasc" --frames 20 --sram-in "$WORK/save.srm" \
     --reset-at 10 --sram-out "$WORK/save.srm" --expect-pixel 10,10,2222ff
 check_srm "reset: the 2D cart saves on top of it" 03

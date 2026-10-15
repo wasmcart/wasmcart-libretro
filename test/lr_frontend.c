@@ -598,6 +598,7 @@ int main(int argc, char** argv) {
         if (o) { fwrite(data, 1, size, o); fclose(o); }
         printf("lr_frontend: SAVE_RAM size %zu at unload%s\n", size, o ? ", written" : ", nothing written");
     }
+    retro_unload_game();  // after SAVE_RAM is read, as RetroArch closes content
     fflush(stdout);
     // _exit throughout: V8 teardown at exit is not what is under test.
     if (trapped) { printf("lr_frontend: FAIL: the cart trapped\n"); fflush(stdout); _exit(1); }

@@ -326,6 +326,7 @@ static uint32_t pref_height = 1080;
 static bool jit_disabled = false;
 static bool wgpu_disabled = false;
 static bool perf_log_on = false;
+static void perf_flush(void);
 
 static const struct retro_core_option_v2_definition option_defs[] = {
     {
@@ -547,7 +548,7 @@ void retro_set_environment(retro_environment_t cb) {
 void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "wasmcart";
-    info->library_version = "0.12.0";
+    info->library_version = "0.12.1";
     info->valid_extensions = "wasc|wasm";
     info->need_fullpath = true;   // we read the file ourselves (ZIP)
     info->block_extract = true;   // don't extract, we handle ZIP
@@ -801,6 +802,7 @@ void retro_init(void) {
 }
 
 void retro_deinit(void) {
+    perf_flush();
     for (uint32_t i = 0; i < WC_MAX_PADS; i++) lr_rumble_stop(NULL, i);
     wc_host_exit_v8();
     wc_host_destroy(host);
@@ -987,6 +989,7 @@ bool retro_load_game_special(unsigned type, const struct retro_game_info* info, 
 
 void retro_unload_game(void) {
     // Save data is handled via retro_get_memory_*
+    perf_flush();
 }
 
 // ─── WebGPU present ─────────────────────────────────────────────────────────
@@ -1629,6 +1632,48 @@ static void perf_line(const char* fmt, ...) {
         fflush(perf_file);
     }
 }
+// The lines for the frames since the last ones: once a second, and at unload
+// for the last part second (a short session still gets its lines).
+static double perf_heap_mb = 0;  // V8's heap at the last take
+static void perf_emit(double t_exit, double t) {
+    double secs = (t_exit - perf_sec_t0) / 1000.0, n = PS.frames ? PS.frames : 1;
+    double cm = cpu_ms(1), ca = cpu_ms(0);
+    double main_cpu = cm - PS.cpu_main0, bg_cpu = (ca - PS.cpu_all0) - main_cpu;
+    perf_line("wasmcart perf: t=%.0f fps %.1f | run %.1f max %.1f | code %.1f gl %.1f (%.0f calls, slowest %s %.1f) | "
+              "gap %.1f max %.1f | dt %.1f max %.1f ticks %.2f | gc %.1f ms (%u) heap %.1f MB | cpu main %.0f bg %.0f ms/s",
+              t, PS.frames / secs, PS.run_sum / n, PS.run_max, (PS.run_sum - PS.gl_sum) / n, PS.gl_sum / n, PS.gl_calls / n,
+              PS.slowest_gl ? PS.slowest_gl : "-", PS.slowest_gl_ms, PS.gap_sum / n, PS.gap_max, PS.dt_sum / n, PS.dt_max,
+              PS.dt_sum / n / (1000.0 / 60.0), PS.gc_ms, PS.gc_count, perf_heap_mb, main_cpu / secs, bg_cpu / secs);
+    {
+        const wc_cart_info_t* ci = host ? wc_host_get_cart_info(host) : NULL;
+        double rate = ci && ci->audio_sample_rate ? ci->audio_sample_rate : 48000.0;
+        perf_line("wasmcart perf: t=%.0f frontend calls | video_cb %.1f max %.1f | audio_batch %.1f max %.1f "
+                  "(%.0f samples a frame, %.0f a frame at %.0f Hz / 60) | input_poll %.1f",
+                  t, PS.fe_video / n, PS.fe_video_max, PS.fe_audio / n, PS.fe_audio_max, PS.samples / n,
+                  rate / 60.0, rate, PS.fe_input / n);
+    }
+    // the phases, in ms per frame; wc_render's GL imports are its "gl" share
+    perf_line("wasmcart perf: t=%.0f phases | input %.3f | glstate %.3f | wc_render %.3f | gl_imports %.3f | "
+              "host_frame %.3f | present %.3f | audio %.3f | other %.3f | wgpu_direct_calls %.0f",
+              t, PS.p_input / n, PS.p_glstate / n, PS.p_render / n, PS.gl_sum / n, PS.p_host_frame / n,
+              PS.p_present / n, PS.p_audio / n,
+              (PS.run_sum - PS.p_input - PS.p_glstate - PS.p_frame - PS.p_present - PS.p_audio) / n, PS.wgpu_calls / n);
+    if (host && wc_host_uses_wgpu(host)) {
+        double sh = PS.w_shown ? PS.w_shown : 1;
+        if (wgpu_gl_shared)
+            perf_line("wasmcart perf: t=%.0f webgpu shared | cart %.1f (wc_render + glue) | copy %.1f | draw %.1f | shown %u of %u frames",
+                      t, PS.w_cart / n, PS.w_queue / n, PS.w_upload / sh, PS.w_shown, PS.frames);
+        else
+            perf_line("wasmcart perf: t=%.0f webgpu readback | cart %.1f (wc_render + glue) | queue %.1f | wait %.1f max %.1f | "
+                      "upload %.1f | latency %.1f (queue to mapped: GPU frame + copy) | shown %u of %u frames",
+                      t, PS.w_cart / n, PS.w_queue / n, PS.w_wait / n, PS.w_wait_max, PS.w_upload / sh, PS.w_latency / sh,
+                      PS.w_shown, PS.frames);
+    }
+    memset(&PS, 0, sizeof PS);
+    PS.cpu_main0 = cm;
+    PS.cpu_all0 = ca;
+    perf_sec_t0 = t_exit;
+}
 static void perf_frame(double t_enter, double t_exit, double delta_ms) {
     static bool started = false;
     if (!started) {
@@ -1646,6 +1691,7 @@ static void perf_frame(double t_enter, double t_exit, double delta_ms) {
     }
     wc_host_prof_t pr;
     wc_host_prof_take(&pr);
+    perf_heap_mb = pr.heap_used_mb;
     double run = t_exit - t_enter, gap = t_enter - perf_prev_exit;
     perf_prev_exit = t_exit;
     PS.frames++;
@@ -1686,43 +1732,10 @@ static void perf_frame(double t_enter, double t_exit, double delta_ms) {
         perf_line("wasmcart perf: slow frame t=%.2f frame %u: run %.1f (gl %.1f in %u calls, slowest %s %.1f) gap %.1f dt %.1f gc %.1f (%u)",
                   t, frame_count, run, pr.gl_ms, pr.gl_calls, pr.gl_max_name ? pr.gl_max_name : "-", pr.gl_max_ms, gap, delta_ms,
                   pr.gc_ms, pr.gc_count);
-    if (t_exit - perf_sec_t0 >= 1000.0) {
-        double secs = (t_exit - perf_sec_t0) / 1000.0, n = PS.frames ? PS.frames : 1;
-        double cm = cpu_ms(1), ca = cpu_ms(0);
-        double main_cpu = cm - PS.cpu_main0, bg_cpu = (ca - PS.cpu_all0) - main_cpu;
-        perf_line("wasmcart perf: t=%.0f fps %.1f | run %.1f max %.1f | code %.1f gl %.1f (%.0f calls, slowest %s %.1f) | "
-                  "gap %.1f max %.1f | dt %.1f max %.1f ticks %.2f | gc %.1f ms (%u) heap %.1f MB | cpu main %.0f bg %.0f ms/s",
-                  t, PS.frames / secs, PS.run_sum / n, PS.run_max, (PS.run_sum - PS.gl_sum) / n, PS.gl_sum / n, PS.gl_calls / n,
-                  PS.slowest_gl ? PS.slowest_gl : "-", PS.slowest_gl_ms, PS.gap_sum / n, PS.gap_max, PS.dt_sum / n, PS.dt_max,
-                  PS.dt_sum / n / (1000.0 / 60.0), PS.gc_ms, PS.gc_count, pr.heap_used_mb, main_cpu / secs, bg_cpu / secs);
-        {
-            const wc_cart_info_t* ci = host ? wc_host_get_cart_info(host) : NULL;
-            double rate = ci && ci->audio_sample_rate ? ci->audio_sample_rate : 48000.0;
-            perf_line("wasmcart perf: t=%.0f frontend calls | video_cb %.1f max %.1f | audio_batch %.1f max %.1f "
-                      "(%.0f samples a frame, %.0f a frame at %.0f Hz / 60) | input_poll %.1f",
-                      t, PS.fe_video / n, PS.fe_video_max, PS.fe_audio / n, PS.fe_audio_max, PS.samples / n,
-                      rate / 60.0, rate, PS.fe_input / n);
-        }
-        // the phases, in ms per frame; wc_render's GL imports are its "gl" share
-        perf_line("wasmcart perf: t=%.0f phases | input %.3f | glstate %.3f | wc_render %.3f | gl_imports %.3f | "
-                  "host_frame %.3f | present %.3f | audio %.3f | other %.3f | wgpu_direct_calls %.0f",
-                  t, PS.p_input / n, PS.p_glstate / n, PS.p_render / n, PS.gl_sum / n, PS.p_host_frame / n,
-                  PS.p_present / n, PS.p_audio / n,
-                  (PS.run_sum - PS.p_input - PS.p_glstate - PS.p_frame - PS.p_present - PS.p_audio) / n, PS.wgpu_calls / n);
-        if (host && wc_host_uses_wgpu(host)) {
-            double sh = PS.w_shown ? PS.w_shown : 1;
-            if (wgpu_gl_shared)
-                perf_line("wasmcart perf: t=%.0f webgpu shared | cart %.1f (wc_render + glue) | copy %.1f | draw %.1f | shown %u of %u frames",
-                          t, PS.w_cart / n, PS.w_queue / n, PS.w_upload / sh, PS.w_shown, PS.frames);
-            else
-                perf_line("wasmcart perf: t=%.0f webgpu readback | cart %.1f (wc_render + glue) | queue %.1f | wait %.1f max %.1f | "
-                          "upload %.1f | latency %.1f (queue to mapped: GPU frame + copy) | shown %u of %u frames",
-                          t, PS.w_cart / n, PS.w_queue / n, PS.w_wait / n, PS.w_wait_max, PS.w_upload / sh, PS.w_latency / sh,
-                          PS.w_shown, PS.frames);
-        }
-        memset(&PS, 0, sizeof PS);
-        PS.cpu_main0 = cm;
-        PS.cpu_all0 = ca;
-        perf_sec_t0 = t_exit;
-    }
+    if (t_exit - perf_sec_t0 >= 1000.0) perf_emit(t_exit, t);
+}
+
+static void perf_flush(void) {
+    if (!perf_log_on || !PS.frames) return;
+    perf_emit(perf_prev_exit, (perf_prev_exit - perf_t_start) / 1000.0);
 }
