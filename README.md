@@ -114,7 +114,7 @@ Dawn and the WebGPU host code are not inside the core: they are in a directory,
 directory goes beside the real file. `WASMCART_WGPU_DIR=<dir>` in the environment
 points the core somewhere else. The directory holds `dawn.node` and
 `libwebgpu_dawn.so` from [native-dawn](https://github.com/monteslu/native-dawn)
-0.1.5, wasmcart-native's `wgpu_bridge.cjs`, and wasmcart's `src/wgpu` JavaScript.
+0.1.6, wasmcart-native's `wgpu_bridge.cjs`, and wasmcart's `src/wgpu` JavaScript.
 
 Which GPU API a cart gets:
 
@@ -171,7 +171,7 @@ wasmcart's `src/wgpu`; `deps/wasmcart-native/scripts/fetch-wgpu-deps.sh` fetches
 (native-dawn by pinned sha256):
 
 ```bash
-NATIVE_DAWN_VERSION=0.1.5 WASMCART_VERSION=0.34.2 \
+NATIVE_DAWN_VERSION=0.1.6 WASMCART_VERSION=0.34.4 \
   sh deps/wasmcart-native/scripts/fetch-wgpu-deps.sh linux-x64 deps/wgpu
 cmake -B build -DWASMCART_WGPU_JS_DIR=$PWD/deps/wgpu/wasmcart/src/wgpu \
                -DNATIVE_DAWN_DIR=$PWD/deps/wgpu/native-dawn
