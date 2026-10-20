@@ -18,8 +18,8 @@ env:
   # closed cart go, objectHandle on a Proxy of a WebGPU object, and the
   # wasmImports its bridge calls).
   NATIVE_DAWN_VERSION: 0.1.6
-  WASMCART_VERSION: 0.34.4
-  WASMCART_SPEC: https://github.com/wasmcart/wasmcart/releases/download/v0.34.4/wasmcart-0.34.4.tgz
+  WASMCART_VERSION: 0.35.1
+  WASMCART_SPEC: https://github.com/wasmcart/wasmcart/releases/download/v0.35.1/wasmcart-0.35.1.tgz
 
 jobs:
   build-linux-x86_64:

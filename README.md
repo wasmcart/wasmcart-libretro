@@ -171,7 +171,7 @@ wasmcart's `src/wgpu`; `deps/wasmcart-native/scripts/fetch-wgpu-deps.sh` fetches
 (native-dawn by pinned sha256):
 
 ```bash
-NATIVE_DAWN_VERSION=0.1.6 WASMCART_VERSION=0.34.4 \
+NATIVE_DAWN_VERSION=0.1.6 WASMCART_VERSION=0.35.1 \
   sh deps/wasmcart-native/scripts/fetch-wgpu-deps.sh linux-x64 deps/wgpu
 cmake -B build -DWASMCART_WGPU_JS_DIR=$PWD/deps/wgpu/wasmcart/src/wgpu \
                -DNATIVE_DAWN_DIR=$PWD/deps/wgpu/native-dawn
