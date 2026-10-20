@@ -40,13 +40,25 @@ add_library(wasmcart_libretro SHARED
     ${WC_NATIVE}/src/asset_loader.c
     ${WC_NATIVE}/deps/miniz.c
     ${WC_NATIVE}/deps/cJSON.c
+    ${CMAKE_CURRENT_BINARY_DIR}/testcart_wasc.h
 )
+
+# The test cart (testcart/README.md), compiled in: run when RetroArch starts
+# the core with no content.
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/testcart_wasc.h
+    COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_CURRENT_SOURCE_DIR}/testcart/testcart.wasc
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/testcart_wasc.h -DNAME=testcart_wasc
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed.cmake
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/testcart/testcart.wasc ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed.cmake
+    COMMENT "Embedding testcart/testcart.wasc")
 
 # No "lib" prefix — RetroArch expects "wasmcart_libretro.so" not "libwasmcart_libretro.so"
 set_target_properties(wasmcart_libretro PROPERTIES PREFIX "")
 
 target_include_directories(wasmcart_libretro PRIVATE
     src
+    ${CMAKE_CURRENT_BINARY_DIR}
     ${WC_NATIVE}/include
     ${WC_NATIVE}/src
     ${WC_NATIVE}/deps

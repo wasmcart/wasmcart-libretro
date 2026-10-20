@@ -188,6 +188,25 @@ browser reveals a gamepad on its first press. A port set to None in Quick Menu
 → Controls, or past the number of users RetroArch is set to, is disconnected.
 `test/pads_test.sh` checks it with wasmcart-native's pad cart.
 
+## No content: the test cart
+
+Load Core, then Start Core (no content), runs the test cart built into the core
+(wasmcart's [`testcart/`](https://github.com/wasmcart/wasmcart/tree/main/testcart);
+`testcart/` here has the copy the core compiles in). It checks a setup by eye:
+
+- the four pads, every button lit while held, sticks, triggers, raw values and
+  the device; L3 and R3 run the rumble motors
+- the pointer (mouse and touch slots, with trails) and the keyboard
+- sound: A, B, X and Y each play their own note (P1 sine, P2 square, P3
+  triangle, P4 saw); holding L sends them to the left channel only and R to the
+  right only; the triggers bend the pitch
+- saves: each start checks the save byte for byte and says FRESH, OK (with the
+  start count), TRUNCATED or CORRUPT; SELECT+START held 3 seconds clears it, and
+  the next start must say FRESH
+
+The cart is written to `wasmcart/testcart.wasc` in the save directory and runs
+from there like any cart; its save is the core's `.srm`.
+
 ## Core Options
 
 - **Internal Resolution**: 270p, 360p, 640x480, 540p, 720p, 1080p, 1440p, 4K — passed to the cart as its preferred resolution (`wc_host_info_t`); a cart that follows it (cartwheel games do) renders the largest frame of its own aspect that fits, and RetroArch shows it at that aspect. Applies when content loads or restarts (Quick Menu → Restart Content)

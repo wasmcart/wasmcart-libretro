@@ -47,6 +47,11 @@
 #    connected from their first input (port 0 always), each in its own slot,
 #    and stay so until the frontend sets the port to None or its user count
 #    drops below it (ports 1-3 were never connected before 0.11.0).
+# 11. No content (RetroArch's Start Core): the core says it supports it and
+#    runs its compiled-in test cart (testcart/), written to the save
+#    directory. Its save panel reads FRESH on the first start (the word in
+#    orange), OK on the next from the .srm (green) and TRUNCATED from an .srm
+#    cut short (red: the control, a save that did not come back whole).
 # 8. WebGPU (the build must have wasmcart_libretro_wgpu/ beside the core, and
 #    the machine a Vulkan GPU): wasmcart-native's fixtures run on Dawn and
 #    their frames reach RetroArch's GL framebuffer with the right pixels. The
@@ -117,6 +122,15 @@ check_srm "save: the .srm holds the cart's save" 01
 run "save: the next run starts from it"       "$WORK/save.wasc" --frames 10 --sram-in "$WORK/save.srm" \
     --sram-out "$WORK/save.srm" --expect-pixel 10,10,22ff22
 check_srm "save: and saves on top of it" 02
+
+mkdir -p "$WORK/saves"
+run "no content: the test cart starts FRESH"  - --save-dir "$WORK/saves" --frames 10 --sram-out "$WORK/tc.srm" \
+    --expect-pixel 46,310,ffb030
+run "no content: the next start reads it OK"  - --save-dir "$WORK/saves" --frames 10 --sram-in "$WORK/tc.srm" \
+    --expect-pixel 46,310,34e07a
+head -c 20000 "$WORK/tc.srm" > "$WORK/tc-cut.srm"
+run "no content: a cut-short save is TRUNCATED" - --save-dir "$WORK/saves" --frames 10 --sram-in "$WORK/tc-cut.srm" \
+    --expect-pixel 46,310,ff4848
 
 clang="${WASI_SDK:-$HOME/code/mine/wasi-sdk}/bin/clang"
 if [ ! -x "$clang" ]; then echo "FAIL reset: no wasi-sdk clang at $clang (set WASI_SDK)"; fail=$((fail + 1)); else

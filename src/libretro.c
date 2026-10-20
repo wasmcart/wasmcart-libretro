@@ -19,6 +19,14 @@
 // from RetroArch's get_proc_address — the core links no GL library of its own.
 #include "gl_procs.h"
 #include <wc_log.h>
+#ifdef _WIN32
+#include <direct.h>
+#define make_dir(p) _mkdir(p)
+#else
+#include <sys/stat.h>
+#define make_dir(p) mkdir((p), 0755)
+#endif
+#include "testcart_wasc.h"   // testcart_wasc[], testcart_wasc_len (CMakeLists.txt)
 
 // ─── Libretro callbacks ─────────────────────────────────────────────────────
 
@@ -536,8 +544,8 @@ void retro_set_environment(retro_environment_t cb) {
     // Core options
     cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2, (void*)&options_v2);
 
-    // We support no-game = false (need a .wasc to load)
-    bool no_game = false;
+    // No content (Start Core) runs the test cart (retro_load_game)
+    bool no_game = true;
     cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_game);
 }
 
@@ -546,7 +554,7 @@ void retro_set_environment(retro_environment_t cb) {
 void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "wasmcart";
-    info->library_version = "0.13.0";
+    info->library_version = "0.14.0";
     info->valid_extensions = "wasc|wasm";
     info->need_fullpath = true;   // we read the file ourselves (ZIP)
     info->block_extract = true;   // don't extract, we handle ZIP
@@ -877,20 +885,68 @@ static bool load_cart(void) {
     return true;
 }
 
+// No content (RetroArch's Start Core): the test cart, wasmcart's testcart/
+// compiled in (testcart/README.md): pads, pointer, keyboard, sound and saves
+// on one screen. It is written to <save directory>/wasmcart/testcart.wasc
+// (the system directory when there is no save directory) and loaded from
+// there like any cart, so Restart Content, the code cache and SAVE_RAM work
+// the same. The file is rewritten only when it differs from the cart this
+// core carries.
+static bool testcart_file(char* out, size_t cap) {
+    const char* dir = NULL;
+    if (!(environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &dir) && dir && *dir) &&
+        !(environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &dir) && dir && *dir)) {
+        notify("No content: the test cart needs a save or system directory to run from.", RETRO_LOG_ERROR, 10000);
+        return false;
+    }
+    char sub[3800];
+    if ((size_t)snprintf(sub, sizeof sub, "%s/wasmcart", dir) >= sizeof sub) {
+        notify("No content: the save directory path is too long for the test cart.", RETRO_LOG_ERROR, 10000);
+        return false;
+    }
+    make_dir(sub);
+    snprintf(out, cap, "%s/testcart.wasc", sub);
+    FILE* f = fopen(out, "rb");
+    if (f) {
+        size_t i = 0;
+        int ch;
+        bool same = true;
+        while ((ch = fgetc(f)) != EOF)
+            if (i >= testcart_wasc_len || (unsigned char)ch != testcart_wasc[i++]) { same = false; break; }
+        fclose(f);
+        if (same && i == testcart_wasc_len) return true;
+    }
+    f = fopen(out, "wb");
+    bool ok = f && fwrite(testcart_wasc, 1, testcart_wasc_len, f) == testcart_wasc_len;
+    if (f && fclose(f) != 0) ok = false;
+    if (!ok) {
+        char msg[4200];
+        snprintf(msg, sizeof msg, "No content: the test cart could not be written to %s", out);
+        notify(msg, RETRO_LOG_ERROR, 10000);
+    }
+    return ok;
+}
+
 bool retro_load_game(const struct retro_game_info* game) {
     lr_action_count = -1;   // input descriptors are re-sent for the new cart
     for (int p = 0; p < WC_LR_PORTS; p++) lr_device_sent[p] = -1;  // and devices
     lr_frames = 0;
     memset(lr_port_seen, 0, sizeof lr_port_seen);
-    if (!host || !game || !game->path) return false;
+    if (!host) return false;
+    if (game && game->path && *game->path) {
+        snprintf(game_path, sizeof game_path, "%s", game->path);
+    } else {
+        if (!testcart_file(game_path, sizeof game_path)) return false;
+        wc_log("wasmcart: no content: the test cart, %s\n", game_path);
+    }
 
     // Set up file logging next to the cart (Android: logcat buffer too small)
     {
-        const char* slash = strrchr(game->path, '/');
+        const char* slash = strrchr(game_path, '/');
         if (slash) {
-            size_t dir_len = (size_t)(slash - game->path);
+            size_t dir_len = (size_t)(slash - game_path);
             char log_path[1024];
-            snprintf(log_path, sizeof(log_path), "%.*s/wasmcart.log", (int)dir_len, game->path);
+            snprintf(log_path, sizeof(log_path), "%.*s/wasmcart.log", (int)dir_len, game_path);
             wc_log_set_file(log_path);
         }
     }
@@ -899,8 +955,6 @@ bool retro_load_game(const struct retro_game_info* game) {
     enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_XRGB8888;
     environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt);
 
-
-    snprintf(game_path, sizeof game_path, "%s", game->path);
     if (!load_cart()) return false;
 
     // Which GPU API a cart that imports WebGPU got, on screen once at load.

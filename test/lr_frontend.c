@@ -5,7 +5,7 @@
 // frames and can take a save state and restore it mid-run, the way RetroArch
 // does for save states, rewind and run-ahead.
 //
-//   lr_frontend <core.so> <cart.wasc> [--frames N] [--save-at F] [--restore-at F]
+//   lr_frontend <core.so> <cart.wasc | -> [--frames N] [--save-at F] [--restore-at F]
 //               [--option key=value]... [--expect-message TEXT]
 //               [--state-out FILE] [--state-in FILE] [--unplug-at F]
 //               [--gles2 real|es3] [--expect-video sw|hw|black]
@@ -14,8 +14,11 @@
 //               [--input FILE] [--shot F:FILE.ppm]... [--timing F]
 //               [--unplug-port F:P]... [--plug-port F:P]... [--max-users N]
 //               [--set-option F:key=value]... [--reset-at F] [--expect-size WxH]
-//               [--pace HZ]
+//               [--pace HZ] [--save-dir DIR]
 //
+// A cart of "-" starts the core with no content (RetroArch's Start Core):
+// retro_load_game(NULL), refused here unless the core said
+// SET_SUPPORT_NO_GAME true. --save-dir answers GET_SAVE_DIRECTORY.
 // --input plays RetroPads from a script: one line per change,
 // "[p<port>] <frame> <buttons> <lx> <ly> [<rx> <ry>]", port 0-3 (0 when
 // absent), buttons a comma list of RetroPad names (b a y x l r l2 r2 l3 r3
@@ -126,6 +129,8 @@ static uintptr_t get_fb(void) { return fbo; }
 static retro_proc_address_t get_proc(const char* sym) { return (retro_proc_address_t)eglGetProcAddress(sym); }
 
 static long max_users = -1; /* --max-users: GET_INPUT_MAX_USERS answered (else unsupported) */
+static const char* save_dir;   /* --save-dir: GET_SAVE_DIRECTORY answered (else unsupported) */
+static bool no_game_ok;        /* what the core said with SET_SUPPORT_NO_GAME */
 static bool env_cb(unsigned cmd, void* data) {
     switch (cmd) {
     case RETRO_ENVIRONMENT_GET_INPUT_MAX_USERS:
@@ -161,9 +166,15 @@ static bool env_cb(unsigned cmd, void* data) {
     case RETRO_ENVIRONMENT_SET_MESSAGE:
         note_message(((const struct retro_message*)data)->msg);
         return true;
+    case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
+        if (!save_dir) return false;
+        *(const char**)data = save_dir;
+        return true;
+    case RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME:
+        no_game_ok = *(const bool*)data;
+        return true;
     case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
     case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2:
-    case RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME:
     case RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK:
     case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
         return true;
@@ -382,6 +393,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--state-in")) state_in = argv[i + 1];
         else if (!strcmp(argv[i], "--unplug-at")) unplug_at = atol(argv[i + 1]);
         else if (!strcmp(argv[i], "--max-users")) max_users = atol(argv[i + 1]);
+        else if (!strcmp(argv[i], "--save-dir")) save_dir = argv[i + 1];
         else if ((!strcmp(argv[i], "--unplug-port") || !strcmp(argv[i], "--plug-port")) && plug_count < MAX_PLUGS) {
             if (sscanf(argv[i + 1], "%ld:%d", &plug_frame[plug_count], &plug_port[plug_count]) != 2) return 2;
             plug_dev[plug_count++] = argv[i][2] == 'u' ? RETRO_DEVICE_NONE : RETRO_DEVICE_JOYPAD;
@@ -463,7 +475,9 @@ int main(int argc, char** argv) {
     retro_init();
 
     struct retro_game_info game = { argv[2], NULL, 0, NULL };
-    if (!retro_load_game(&game)) { fprintf(stderr, "lr_frontend: load failed\n"); return 1; }
+    bool no_content = !strcmp(argv[2], "-");
+    if (no_content && !no_game_ok) { fprintf(stderr, "lr_frontend: the core does not support starting with no content\n"); return 1; }
+    if (!retro_load_game(no_content ? NULL : &game)) { fprintf(stderr, "lr_frontend: load failed\n"); return 1; }
     if (sram_in) {
         // RetroArch's content_load_ram_file: before video init (context_reset)
         // and before the first retro_run; a size of 0 loads nothing.
