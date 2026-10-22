@@ -341,14 +341,17 @@ static const struct retro_core_option_v2_definition option_defs[] = {
         NULL,
         "The frame size the cart is asked to render (the host's preferred size). A cart that follows it "
         "renders the largest frame of its own aspect that fits (a 16:9 game at 640x480 renders 640x360, shown at 16:9); "
-        "a cart may also choose its own size. Lower is faster on a slow GPU. Applies when content is loaded or restarted (Restart Content).",
+        "a cart may also choose its own size, or follow the aspect without bars, as cartwheel games do. Set it to the screen on a handheld (640x480, 800x480, 1280x800). Lower is faster on a slow GPU. Applies when content is loaded or restarted (Restart Content).",
         NULL, "video",
         {
             { "480x270",   "480x270 (270p)" },
             { "640x360",   "640x360 (360p)" },
-            { "640x480",   "640x480" },
+            { "640x480",   "640x480 (4:3 handhelds)" },
+            { "800x480",   "800x480 (WVGA handhelds)" },
             { "960x540",   "960x540 (540p)" },
+            { "1024x768",  "1024x768 (4:3)" },
             { "1280x720",  "1280x720 (720p)" },
+            { "1280x800",  "1280x800 (16:10: Steam Deck)" },
             { "1920x1080", "1920x1080 (1080p)" },
             { "2560x1440", "2560x1440 (1440p)" },
             { "3840x2160", "3840x2160 (4K)" },
@@ -554,7 +557,7 @@ void retro_set_environment(retro_environment_t cb) {
 void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "wasmcart";
-    info->library_version = "0.14.0";
+    info->library_version = "0.14.1";
     info->valid_extensions = "wasc|wasm";
     info->need_fullpath = true;   // we read the file ourselves (ZIP)
     info->block_extract = true;   // don't extract, we handle ZIP
