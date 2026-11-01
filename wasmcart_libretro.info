@@ -6,7 +6,7 @@ corename = "wasmcart"
 supported_extensions = "wasc"
 license = "MIT"
 permissions = ""
-display_version = "0.14.1"
+display_version = "0.15.0"
 
 # Hardware Information
 manufacturer = "wasmcart"
