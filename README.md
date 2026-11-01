@@ -155,9 +155,10 @@ Dawn's command validation is off (it costs CPU on every call;
 `WASMCART_WGPU_VALIDATION=1` turns it on), and the calls a frame makes most go
 from the cart straight to Dawn's C API (wasmcart-native `src/wgpu_imports.cpp`).
 
-The WebGPU device follows the wasmcart WebGPU tier: the adapter is requested in
-WebGPU compatibility mode (the tier's floor, so a cart cannot depend on more
-than a GLES 3.1-class GPU has), as every wasmcart host does. A cart that asks
+The WebGPU device follows the wasmcart WebGPU tier, as every wasmcart host does:
+core WebGPU where the GPU has it (an HDR scene can multisample), else
+compatibility mode, the tier's floor. `WASMCART_WGPU_FEATURE_LEVEL=core|compatibility`
+in the environment forces one. A cart that asks
 its adapter for info sees backend "WebGPU", type unknown and ids 0 (the
 emdawnwebgpu glue reports that on every JavaScript host, browsers included);
 the host log names the real GPU.

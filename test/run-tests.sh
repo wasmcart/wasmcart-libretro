@@ -202,7 +202,8 @@ else
     && { echo "ok   webgpu: WebGPU-only cart refused on screen with GPU API GL"; pass=$((pass + 1)); } \
     || { echo "FAIL webgpu: WebGPU-only cart refused on screen with GPU API GL"; tail -3 "$WORK/out.txt" | sed 's/^/     /'; fail=$((fail + 1)); }
 fi
-run "webgpu: a cart that resizes its surface"    "$WORK/wgpuedges.wasc" --frames 20 --expect-size 160x120 --expect-pixel 150,110,0000ff
+# (at compatibility mode: it asks for a device above the host's and destroys it, and a core host device would be that device)
+WASMCART_WGPU_FEATURE_LEVEL=compatibility run "webgpu: a cart that resizes its surface"    "$WORK/wgpuedges.wasc" --frames 20 --expect-size 160x120 --expect-pixel 150,110,0000ff
 run "webgpu: a lost device is said on screen"    "$WORK/wgpulost.wasc" --frames 40 --expect-message "The GPU device was lost"
 # (the log goes to the frontend's save directory; lr_frontend has none, so the working directory)
 ( cd "$WORK" && WASMCART_PERF_LOG=1 timeout -s KILL 180 "$FE" "$CORE" "$WORK/wgpucart.wasc" --frames 6000 > "$WORK/out.txt" 2>&1 )
